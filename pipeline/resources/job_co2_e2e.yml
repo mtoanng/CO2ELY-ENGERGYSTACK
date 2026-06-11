@@ -1,7 +1,9 @@
-# End-to-end orchestrator: Bronze → Silver → Gold (sequential)
-# Mirrors bosch_ely_adb_batch job_ely_r2g pattern with run_job_task chaining.
+# =============================================================================
+# REUSABLE COMPONENTS
+# =============================================================================
 
-common_e2e_job_settings: &common_e2e_job_settings
+# --- Common job-level settings ---
+_e2e_job_base: &e2e_job_base
   parameters:
     - name: "is_integration_test"
       default: "false"
@@ -11,25 +13,25 @@ common_e2e_job_settings: &common_e2e_job_settings
     - group_name: "idm2bcd_dssi03prod_pemely_data"
       level: "CAN_MANAGE"
   max_concurrent_runs: 1
-  job_clusters:
-    - job_cluster_key: job_cluster
-      new_cluster:
-        policy_id: ${var.scaled_job_cluster_policy_id}
-        spark_version: 15.4.x-scala2.12
-        node_type_id: Standard_D16as_v4
-        driver_node_type_id: Standard_D16as_v4
-        data_security_mode: USER_ISOLATION
-        autoscale:
-          min_workers: 1
-          max_workers: 4
-        azure_attributes:
-          availability: "SPOT_WITH_FALLBACK_AZURE"
-          first_on_demand: 1
-          spot_bid_max_price: -1
-        custom_tags:
-          product_department_team: "ELY"
-          project: "CO_energystack"
-  tasks:
+
+# =============================================================================
+# COMPOSED JOB SETTINGS
+# =============================================================================
+
+# Setting for dev/qa/prod
+common_e2e_job_settings: &common_e2e_job_settings
+  <<: *e2e_job_base
+  email_notifications:
+    on_failure: ${var.notification_recipients}
+  notification_settings:
+    no_alert_for_skipped_runs: true
+  health:
+    rules:
+      - metric: "RUN_DURATION_SECONDS"
+        op: "GREATER_THAN"
+        value: 18000  # 5 hours
+
+  tasks: &e2e_tasks
     - task_key: tsk_converter
       run_job_task:
         job_id: ${resources.jobs.job_co2_converter.id}
@@ -59,6 +61,14 @@ common_e2e_job_settings: &common_e2e_job_settings
         - task_key: tsk_silver
       run_if: ALL_DONE
 
+# Setting for integration test
+common_e2e_job_settings_int_test: &common_e2e_job_settings_int_test
+  <<: *e2e_job_base
+  tasks: *e2e_tasks
+
+# =============================================================================
+# TARGETS
+# =============================================================================
 targets:
   dev_user:
     resources:
@@ -66,6 +76,10 @@ targets:
         job_co2_e2e:
           <<: *common_e2e_job_settings
           name: job_co2_e2e
+
+        job_co2_int_test_e2e:
+          <<: *common_e2e_job_settings_int_test
+          name: job_co2_int_test_e2e
 
   dev:
     resources:
@@ -91,21 +105,24 @@ targets:
             quartz_cron_expression: "0 0 18 ? * MON-FRI"
             timezone_id: "Europe/Amsterdam"
             pause_status: "UNPAUSED"
-          email_notifications:
-            on_failure:
-              - got4hc@bosch.com
-            no_alert_for_skipped_runs: true
 
   dev_integration_test:
     resources:
       jobs:
         job_co2_int_test_e2e:
-          <<: *common_e2e_job_settings
+          <<: *common_e2e_job_settings_int_test
+          name: job_co2_int_test_e2e
+
+  qa_integration_test:
+    resources:
+      jobs:
+        job_co2_int_test_e2e:
+          <<: *common_e2e_job_settings_int_test
           name: job_co2_int_test_e2e
 
   prod_integration_test:
     resources:
       jobs:
         job_co2_int_test_e2e:
-          <<: *common_e2e_job_settings
+          <<: *common_e2e_job_settings_int_test
           name: job_co2_int_test_e2e

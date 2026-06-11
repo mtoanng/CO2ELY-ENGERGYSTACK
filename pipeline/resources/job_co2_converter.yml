@@ -1,87 +1,117 @@
-# Raw layer: Convert XLSX/CSV from ADLS blob → normalized Parquet
-# Single-node (driver-only). ThreadPoolExecutor for file-level parallelism.
-# Uses Polars (calamine engine) for XLSX, Polars C for CSV.
+# =============================================================================
+# REUSABLE COMPONENTS (same pattern as TBP job_ely_bronze.yml)
+# =============================================================================
 
-common_converter_job_settings: &common_converter_job_settings
+# --- Base cluster config ---
+# Single-node for dev (Polars on driver via local[*]).
+# Scale to multi-worker for production — Spark distributes files to executors,
+# each runs Polars natively via UC Volume FUSE (zero JVM overhead).
+_converter_cluster_base: &converter_cluster_base
+  policy_id: ${var.static_job_cluster_policy_id}
+  spark_version: ${var.spark_version}
+  node_type_id: ${var.static_node_type}
+  driver_node_type_id: ${var.static_node_type}
+  num_workers: 0
+  spark_conf:
+    spark.master: "local[*]"
+    spark.databricks.cluster.profile: singleNode
+  azure_attributes:
+    availability: "SPOT_WITH_FALLBACK_AZURE"
+    first_on_demand: 1
+    spot_bid_max_price: -1
+  custom_tags:
+    ResourceClass: SingleNode
+    product_department_team: "ELY"
+    project: "CO_energystack"
+
+# --- Common job-level settings (same as TBP) ---
+_converter_job_base: &converter_job_base
   parameters:
-    - name: "tenant_id"
-      default: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
-    - name: "client_id"
-      default: "57029129-abb0-4ec9-9b85-25fffb4af624"
-    - name: "client_secret"
-      default: "ogu8Q~Yer2OJeAd5X_-61K0Ogb~dA7CjFNEftblL"
-    - name: "storage_account"
-      default: "stpsbdodxdev2datalake"
-    - name: "container"
-      default: "co2elyd-data"
-    - name: "source_prefix"
-      default: "test/"
-    - name: "output_prefix"
-      default: "parquet_raw"
-    - name: "tracking_table"
-      default: "co2elyd_dev.converter.file_tracking"
-    - name: "max_workers"
-      default: "4"
+    - name: "is_integration_test"
+      default: "false"
+    - name: "env"
+      default: ${bundle.environment}
   permissions:
     - group_name: "idm2bcd_dssi03prod_pemely_data"
       level: "CAN_MANAGE"
   max_concurrent_runs: 1
+
+# =============================================================================
+# COMPOSED JOB SETTINGS
+# =============================================================================
+
+# Setting for dev/qa/prod
+common_converter_job_settings: &common_converter_job_settings
+  <<: *converter_job_base
+  email_notifications:
+    on_failure: ${var.notification_recipients}
+  notification_settings:
+    no_alert_for_skipped_runs: true
+  health:
+    rules:
+      - metric: "RUN_DURATION_SECONDS"
+        op: "GREATER_THAN"
+        value: 7200  # 2 hours
   job_clusters:
-    - job_cluster_key: converter_cluster
+    - job_cluster_key: job_cluster
       new_cluster:
-        policy_id: ${var.static_job_cluster_policy_id}
-        spark_version: 15.4.x-scala2.12
-        node_type_id: Standard_D16as_v4
-        driver_node_type_id: Standard_D16as_v4
-        num_workers: 0
-        data_security_mode: USER_ISOLATION
-        spark_conf:
-          spark.master: "local[*]"
-          spark.databricks.cluster.profile: singleNode
-        custom_tags:
-          ResourceClass: SingleNode
-          product_department_team: "ELY"
-          project: "CO_energystack"
-        azure_attributes:
-          availability: "SPOT_WITH_FALLBACK_AZURE"
-          first_on_demand: 1
-          spot_bid_max_price: -1
-  tasks:
-    - task_key: tsk_convert_files
+        <<: *converter_cluster_base
+        data_security_mode: SINGLE_USER
+
+  # Tasks run in PARALLEL (no depends_on between xlsx and csv).
+  # Auth: UC Managed Identity via FUSE mount. Zero credentials.
+  # I/O: Polars reads/writes directly to /Volumes/... (no JVM).
+  # Distribution: Spark mapPartitions (linear scaling with num_workers).
+  tasks: &converter_tasks
+    - task_key: tsk_co2_convert_xlsx
       run_if: "ALL_SUCCESS"
-      job_cluster_key: converter_cluster
+      job_cluster_key: job_cluster
       spark_python_task:
         python_file: ../src/_0_convert/run_converter.py
         parameters:
-          - "--tenant_id"
-          - "{{job.parameters.tenant_id}}"
-          - "--client_id"
-          - "{{job.parameters.client_id}}"
-          - "--client_secret"
-          - "{{job.parameters.client_secret}}"
-          - "--storage_account"
-          - "{{job.parameters.storage_account}}"
-          - "--container"
-          - "{{job.parameters.container}}"
-          - "--source_prefix"
-          - "{{job.parameters.source_prefix}}"
-          - "--output_prefix"
-          - "{{job.parameters.output_prefix}}"
-          - "--tracking_table"
-          - "{{job.parameters.tracking_table}}"
-          - "--max_workers"
-          - "{{job.parameters.max_workers}}"
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
+          - "--extensions"
+          - ".xlsx,.xls"
       libraries:
         - pypi:
             package: "polars[calamine]>=1.0"
         - pypi:
             package: "fastexcel"
-        - pypi:
-            package: "azure-identity"
-        - pypi:
-            package: "azure-storage-blob"
       timeout_seconds: 3600
 
+    - task_key: tsk_co2_convert_csv
+      run_if: "ALL_SUCCESS"
+      job_cluster_key: job_cluster
+      spark_python_task:
+        python_file: ../src/_0_convert/run_converter.py
+        parameters:
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
+          - "--extensions"
+          - ".csv"
+      libraries:
+        - pypi:
+            package: "polars>=1.0"
+      timeout_seconds: 3600
+
+# Setting for integration test
+common_converter_job_settings_int_test: &common_converter_job_settings_int_test
+  <<: *converter_job_base
+  job_clusters:
+    - job_cluster_key: job_cluster
+      new_cluster:
+        <<: *converter_cluster_base
+        data_security_mode: USER_ISOLATION
+  tasks: *converter_tasks
+
+# =============================================================================
+# TARGETS
+# =============================================================================
 targets:
   dev_user:
     resources:
@@ -89,6 +119,10 @@ targets:
         job_co2_converter:
           <<: *common_converter_job_settings
           name: job_co2_converter
+
+        job_co2_int_test_converter:
+          <<: *common_converter_job_settings_int_test
+          name: job_co2_int_test_converter
 
   dev:
     resources:
@@ -114,7 +148,24 @@ targets:
             quartz_cron_expression: "0 0/30 * * * ?"
             timezone_id: "Europe/Berlin"
             pause_status: "UNPAUSED"
-          email_notifications:
-            on_failure:
-              - got4hc@bosch.com
-            no_alert_for_skipped_runs: true
+
+  dev_integration_test:
+    resources:
+      jobs:
+        job_co2_int_test_converter:
+          <<: *common_converter_job_settings_int_test
+          name: job_co2_int_test_converter
+
+  qa_integration_test:
+    resources:
+      jobs:
+        job_co2_int_test_converter:
+          <<: *common_converter_job_settings_int_test
+          name: job_co2_int_test_converter
+
+  prod_integration_test:
+    resources:
+      jobs:
+        job_co2_int_test_converter:
+          <<: *common_converter_job_settings_int_test
+          name: job_co2_int_test_converter

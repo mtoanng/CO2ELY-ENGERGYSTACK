@@ -1,175 +1,170 @@
 """ELY Data Converter - production entry point.
 
-Converts raw XLSX/CSV measurement files from ADLS to normalized Parquet.
-Uses ThreadPoolExecutor for file-level parallelism.
-Tracks processed files in Delta table for incremental loads.
+Architecture: Distributed Polars on Spark Workers + UC Volume FUSE.
+
+[Driver Node]
+  ├── Lists XLSX/CSV file paths from UC Volume FUSE mount (os.walk)
+  ├── Queries tracking table for watermark → filters to new files
+  ├── Creates Spark DataFrame of file paths → repartitions across cores
+  └── Collects results from workers → batch MERGE INTO tracking table
+
+[Worker Nodes]  (or local[*] threads on single node)
+  ├── Polars (Rust) reads file directly from FUSE (zero JVM)
+  ├── Transforms: 3-row header → unpivot → 4 Arrow tables
+  └── PyArrow writes Parquet directly to FUSE output (zero JVM)
+
+Auth: UC Managed Identity via FUSE mount. Zero credentials in code.
+Incremental: Delta tracking table with watermark strategy.
+Linear scaling: N executor cores = N files processed in parallel.
+
+Output tables (4):
+  - filemeta: UUID, file_path, raw_file_name, file_size, last_modified, ingested_timestamp
+  - channel: UUID, group, channel, channel_name, unit, column_index
+  - timeseries: UUID, group, sample_offset, channel, value, value_str
+  - statistics: UUID, group, n_channels, n_rows, n_timeseries_rows
 
 Usage (via Databricks job):
     spark_python_task:
         python_file: ../src/_0_convert/run_converter.py
         parameters:
-          - "--tenant_id" / "--client_id" / "--client_secret"
-          - "--storage_account" / "--container"
-          - "--source_prefix" / "--output_prefix"
-          - "--tracking_table" / "--max_workers"
+          - "--is_integration_test" / "--env"
+          - "--extensions" (optional, e.g. ".xlsx,.xls")
 """
+import os
 import sys
+import json
 import time
 import argparse
 from pathlib import Path
-from typing import Dict, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set
 
 # Add current dir to path for sibling imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from azure.identity import ClientSecretCredential
-from azure.storage.blob import BlobClient, ContainerClient
-from pyspark.sql import SparkSession
+from pyspark.sql import SparkSession, Row
+from pyspark.sql.types import (
+    StructType, StructField, StringType, LongType, DoubleType, TimestampType,
+)
 
 from common import (
-    ConversionResult, FileInfo, ParquetWriter, IncrementalTracker,
-    sanitize_name, logger,
+    FileInfo, ParquetWriter, IncrementalTracker,
+    sanitize_name, generate_file_uuid, logger,
+    get_env_variables, get_volume_paths, CONVERTER_CONFIG,
 )
-import csv_converter
-import xlsx_converter
 
 
 # =============================================================================
-# CONVERTER DISPATCH
+# SPARK DISTRIBUTION: WORKER FUNCTION
 # =============================================================================
 
-def get_converter(extension: str):
-    """Return the convert() function for a file extension."""
-    return {
-        ".csv": csv_converter.convert,
-        ".xlsx": xlsx_converter.convert,
-        ".xls": xlsx_converter.convert,
-    }.get(extension.lower())
+# Schema for results returned by mapPartitions
+RESULT_SCHEMA = StructType([
+    StructField("blob_path", StringType(), False),
+    StructField("file_name", StringType(), False),
+    StructField("file_size", LongType(), False),
+    StructField("file_uuid", StringType(), False),
+    StructField("last_modified", TimestampType(), True),
+    StructField("status", StringType(), False),
+    StructField("output_paths", StringType(), True),
+    StructField("error_message", StringType(), True),
+    StructField("duration_seconds", DoubleType(), False),
+])
 
 
-# =============================================================================
-# PIPELINE
-# =============================================================================
+def _process_partition(rows):
+    """Execute on Spark workers. Reads/writes via FUSE. No SparkSession needed.
 
-class ConverterPipeline:
-    """Orchestrates end-to-end conversion.
+    Each row contains file metadata. Worker:
+    1. Reads XLSX/CSV from FUSE path (Polars Rust I/O, zero JVM)
+    2. Transforms (3-row header scan → unpivot → 4 Arrow tables)
+    3. Writes Parquet to FUSE output path (PyArrow, zero JVM)
+    4. Yields result Row for driver to collect
 
-    1. Discover new files (via IncrementalTracker + Delta)
-    2. For each file: download -> convert -> write Parquet -> track
-    3. Parallel execution with ThreadPoolExecutor
+    All file I/O bypasses the JVM entirely. Only path strings cross Spark boundary.
     """
+    # Lazy imports — these run on worker nodes
+    from common import (
+        generate_file_uuid, sanitize_name, ParquetWriter, logger as worker_logger,
+    )
+    from xlsx_converter import convert as xlsx_convert
+    from csv_converter import convert as csv_convert
 
-    def __init__(self, storage_account, container, source_prefix, output_prefix,
-                 credential, tracker, writer, max_workers=4):
-        self.storage_account = storage_account
-        self.container = container
-        self.source_prefix = source_prefix
-        self.output_prefix = output_prefix
-        self.credential = credential
-        self.tracker = tracker
-        self.writer = writer
-        self.max_workers = max_workers
-        self._url = f"https://{storage_account}.blob.core.windows.net"
-
-    def run(self) -> Dict:
-        """Execute pipeline. Returns summary."""
-        t_start = time.perf_counter()
-
-        container_client = ContainerClient(
-            account_url=self._url,
-            container_name=self.container,
-            credential=self.credential,
-        )
-        new_files = self.tracker.get_new_files(container_client, self.source_prefix)
-
-        if not new_files:
-            logger.info("No new files to process.")
-            return {"status": "no_new_files", "total_time": 0}
-
-        logger.info(f"Processing {len(new_files)} file(s) with {self.max_workers} workers")
-        results = {"success": 0, "failed": 0, "total_rows": 0, "files": []}
-
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {executor.submit(self._process_file, f): f for f in new_files}
-            for future in as_completed(futures):
-                r = future.result()
-                if r["status"] == "success":
-                    results["success"] += 1
-                    results["total_rows"] += r.get("rows", 0)
-                else:
-                    results["failed"] += 1
-                results["files"].append(r)
-
-        results["total_time"] = time.perf_counter() - t_start
-        results["status"] = "completed"
-        logger.info(
-            f"Pipeline complete: {results['success']} ok, {results['failed']} failed, "
-            f"{results['total_rows']:,} rows, {results['total_time']:.1f}s"
-        )
-        return results
-
-    def _process_file(self, file_info: FileInfo) -> Dict:
-        """Download -> convert -> write -> track."""
+    for row in rows:
         t0 = time.perf_counter()
-        logger.info(f"  Processing: {file_info.file_name} ({file_info.file_size / 1_048_576:.1f} MB)")
+        fuse_input = row.fuse_path
+        output_dir = row.output_dir
+        ext = row.extension
 
         try:
-            blob_client = BlobClient(
-                account_url=self._url,
-                container_name=self.container,
-                blob_name=file_info.blob_path,
-                credential=self.credential,
-            )
-            download = blob_client.download_blob()
-            file_bytes = download.readall()
+            # Dispatch converter by extension
+            converter = xlsx_convert if ext in (".xlsx", ".xls") else csv_convert
+            results = converter(fuse_input, row.file_size, row.last_modified)
 
-            converter = get_converter(file_info.extension)
-            if not converter:
-                raise ValueError(f"No converter for: {file_info.extension}")
+            if not results:
+                # File had no valid data (empty sheets, etc.)
+                duration = time.perf_counter() - t0
+                yield Row(
+                    blob_path=row.relative_path, file_name=row.file_name,
+                    file_size=row.file_size,
+                    file_uuid=generate_file_uuid(row.relative_path),
+                    last_modified=row.last_modified, status="SKIPPED",
+                    output_paths=None, error_message="No valid data in file",
+                    duration_seconds=round(duration, 2),
+                )
+                continue
 
-            conversion_results = converter(
-                file_bytes, file_info.blob_path, file_info.file_size,
-                last_modified=file_info.last_modified,
-            )
-            del file_bytes
-
-            base_filename = sanitize_name(file_info.file_name.rsplit(".", 1)[0])
+            # Write all results (4 Parquet files per sheet/group)
+            writer = ParquetWriter(output_dir)
+            base_filename = sanitize_name(Path(fuse_input).stem)
             all_paths = {}
             total_rows = 0
 
-            for cr in conversion_results:
-                paths = self.writer.write_result(cr, base_filename)
+            for r in results:
+                paths = writer.write_result(r, base_filename)
                 all_paths.update(paths)
-                total_rows += cr.n_rows
+                total_rows += r.n_rows
 
+            file_uuid = generate_file_uuid(row.relative_path)
             duration = time.perf_counter() - t0
-            self.tracker.mark_success(file_info, all_paths, duration)
-            logger.info(f"  \u2713 {file_info.file_name}: {total_rows:,} rows, {duration:.1f}s")
-            return {"status": "success", "file": file_info.file_name, "rows": total_rows, "duration": duration}
+            worker_logger.info(
+                f"  \u2713 {row.file_name}: {total_rows:,} rows, {duration:.1f}s"
+            )
+
+            yield Row(
+                blob_path=row.relative_path, file_name=row.file_name,
+                file_size=row.file_size, file_uuid=file_uuid,
+                last_modified=row.last_modified, status="SUCCESS",
+                output_paths=json.dumps(all_paths), error_message=None,
+                duration_seconds=round(duration, 2),
+            )
 
         except Exception as e:
             duration = time.perf_counter() - t0
-            self.tracker.mark_failed(file_info, str(e), duration)
-            logger.error(f"  \u2717 {file_info.file_name}: {e}")
-            return {"status": "failed", "file": file_info.file_name, "error": str(e), "duration": duration}
+            file_uuid = generate_file_uuid(row.relative_path)
+            worker_logger.error(f"  \u2717 {row.file_name}: {e}")
+
+            yield Row(
+                blob_path=row.relative_path, file_name=row.file_name,
+                file_size=row.file_size, file_uuid=file_uuid,
+                last_modified=row.last_modified, status="FAILED",
+                output_paths=None, error_message=str(e)[:500],
+                duration_seconds=round(duration, 2),
+            )
 
 
 # =============================================================================
-# MAIN
+# MAIN (same arg pattern as TBP task_runner.py)
 # =============================================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(description="ELY Data Converter")
-    parser.add_argument("--tenant_id", required=True)
-    parser.add_argument("--client_id", required=True)
-    parser.add_argument("--client_secret", required=True)
-    parser.add_argument("--storage_account", default="stpsbdodxdev2datalake")
-    parser.add_argument("--container", default="co2elyd-data")
-    parser.add_argument("--source_prefix", default="test/")
-    parser.add_argument("--output_prefix", default="parquet_raw")
-    parser.add_argument("--tracking_table", default="co2elyd_dev.converter.file_tracking")
-    parser.add_argument("--max_workers", type=int, default=4)
+    # TBP-standard params (passed by all tasks)
+    parser.add_argument("--is_integration_test", type=str, default="false")
+    parser.add_argument("--env", type=str, default="dev_user")
+    # Converter-specific params
+    parser.add_argument("--extensions", default=None,
+                        help="Comma-separated extensions filter, e.g. '.xlsx,.xls' or '.csv'")
     args, _ = parser.parse_known_args()
     return args
 
@@ -177,36 +172,118 @@ def parse_args():
 def main():
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
+    t_start = time.perf_counter()
 
-    credential = ClientSecretCredential(args.tenant_id, args.client_id, args.client_secret)
+    is_integration_test = args.is_integration_test.lower() == "true"
 
-    tracker = IncrementalTracker(args.tracking_table, spark)
-    writer = ParquetWriter(
-        storage_account=args.storage_account,
-        container=args.container,
-        output_prefix=args.output_prefix,
-        credential=credential,
-    )
+    # Auto-detect environment from workspace URL (same as TBP common_utils.py)
+    env_vars = get_env_variables(spark)
+    unity_catalog = env_vars["unity_catalog"]
+    logger.info(f"Environment: {env_vars['environment']}, Catalog: {unity_catalog}")
 
-    pipeline = ConverterPipeline(
-        storage_account=args.storage_account,
-        container=args.container,
-        source_prefix=args.source_prefix,
-        output_prefix=args.output_prefix,
-        credential=credential,
-        tracker=tracker,
-        writer=writer,
-        max_workers=args.max_workers,
-    )
+    # Resolve UC Volume FUSE paths
+    vol_paths = get_volume_paths(unity_catalog)
+    source_dir = vol_paths["source_dir"]
+    output_dir = vol_paths["output_dir"]
+    tracking_table = vol_paths["tracking_table"]
 
-    results = pipeline.run()
+    # Integration test uses separate tracking table
+    if is_integration_test:
+        tracking_table = tracking_table.replace("file_tracking", "tmp_int_test_file_tracking")
+
+    logger.info(f"Source: {source_dir}")
+    logger.info(f"Output: {output_dir}")
+    logger.info(f"Tracking: {tracking_table}")
+
+    # Parse extensions filter
+    extensions = None
+    if args.extensions:
+        extensions = {e.strip() for e in args.extensions.split(",")}
+        logger.info(f"Extensions filter: {extensions}")
+
+    # =========================================================================
+    # STEP 1: Discover new files (driver-side, FUSE listing + watermark)
+    # =========================================================================
+    tracker = IncrementalTracker(tracking_table, spark)
+    new_files = tracker.get_new_files(source_dir)
+
+    # Apply extensions filter
+    if extensions and new_files:
+        new_files = [f for f in new_files if f.extension in extensions]
+        logger.info(f"After extensions filter: {len(new_files)} file(s)")
+
+    if not new_files:
+        logger.info("No new files to process.")
+        print(f"\n{'='*60}")
+        print(f"Pipeline Summary: no_new_files (0.0s)")
+        return
+
+    logger.info(f"Files to process: {len(new_files)}")
+
+    # =========================================================================
+    # STEP 2: Distribute file paths across Spark workers
+    # =========================================================================
+
+    # Distribute sibling modules to workers (needed for mapPartitions imports)
+    src_dir = str(Path(__file__).resolve().parent)
+    spark.sparkContext.addPyFile(os.path.join(src_dir, "common.py"))
+    spark.sparkContext.addPyFile(os.path.join(src_dir, "xlsx_converter.py"))
+    spark.sparkContext.addPyFile(os.path.join(src_dir, "csv_converter.py"))
+
+    # Build rows for Spark DataFrame
+    file_rows = [
+        Row(
+            fuse_path=f.fuse_path,
+            relative_path=f.relative_path,
+            file_name=f.file_name,
+            file_size=f.file_size,
+            last_modified=f.last_modified,
+            extension=f.extension,
+            output_dir=output_dir,
+        )
+        for f in new_files
+    ]
+
+    # Repartition evenly across all available cores
+    num_cores = spark.sparkContext.defaultParallelism
+    num_partitions = min(len(file_rows), num_cores)
+    files_df = spark.createDataFrame(file_rows)
+    distributed_df = files_df.repartition(num_partitions)
+
+    logger.info(f"Distributing {len(file_rows)} files across {num_partitions} partitions "
+                f"({num_cores} cores available)")
+
+    # =========================================================================
+    # STEP 3: Execute on workers (Polars + FUSE, zero JVM for file I/O)
+    # =========================================================================
+    results_rdd = distributed_df.rdd.mapPartitions(_process_partition)
+    results_df = spark.createDataFrame(results_rdd, schema=RESULT_SCHEMA)
+
+    # Force execution and cache results
+    results_df.cache()
+    results_df.count()
+
+    # =========================================================================
+    # STEP 4: Batch MERGE results into tracking table
+    # =========================================================================
+    tracker.batch_merge_results(results_df)
+
+    # Summary
+    stats = results_df.groupBy("status").count().collect()
+    stats_dict = {r.status: r["count"] for r in stats}
+    total_time = time.perf_counter() - t_start
+
+    results_df.unpersist()
+
     print(f"\n{'='*60}")
     print(f"Pipeline Summary:")
-    print(f"  Status: {results['status']}")
-    print(f"  Succeeded: {results.get('success', 0)}")
-    print(f"  Failed: {results.get('failed', 0)}")
-    print(f"  Total rows: {results.get('total_rows', 0):,}")
-    print(f"  Total time: {results.get('total_time', 0):.1f}s")
+    print(f"  Environment: {env_vars['environment']}")
+    print(f"  Integration test: {is_integration_test}")
+    print(f"  Succeeded: {stats_dict.get('SUCCESS', 0)}")
+    print(f"  Failed: {stats_dict.get('FAILED', 0)}")
+    print(f"  Skipped: {stats_dict.get('SKIPPED', 0)}")
+    print(f"  Partitions: {num_partitions} (of {num_cores} cores)")
+    print(f"  Total time: {total_time:.1f}s")
 
 
 if __name__ == "__main__":

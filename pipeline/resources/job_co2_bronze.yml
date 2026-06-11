@@ -1,7 +1,26 @@
-# Bronze layer: Ingest raw Excel from UC Volume → Delta tables
-# Uses Polars (calamine engine) — same reader as the CO_energystacck Dash app.
+# =============================================================================
+# REUSABLE COMPONENTS
+# =============================================================================
 
-common_bronze_job_settings: &common_bronze_job_settings
+# --- Base cluster config (autoscaled for streaming ingest) ---
+_r2b_cluster_base: &r2b_cluster_base
+  policy_id: ${var.scaled_job_cluster_policy_id}
+  spark_version: ${var.spark_version}
+  node_type_id: ${var.scaled_node_type}
+  driver_node_type_id: ${var.scaled_driver_type}
+  autoscale:
+    min_workers: 1
+    max_workers: 4
+  azure_attributes:
+    availability: "SPOT_WITH_FALLBACK_AZURE"
+    first_on_demand: 1
+    spot_bid_max_price: -1
+  custom_tags:
+    product_department_team: "ELY"
+    project: "CO_energystack"
+
+# --- Common job-level settings ---
+_r2b_job_base: &r2b_job_base
   parameters:
     - name: "is_integration_test"
       default: "false"
@@ -10,94 +29,102 @@ common_bronze_job_settings: &common_bronze_job_settings
   permissions:
     - group_name: "idm2bcd_dssi03prod_pemely_data"
       level: "CAN_MANAGE"
-  max_concurrent_runs: 2
+  max_concurrent_runs: 1
+
+# =============================================================================
+# COMPOSED JOB SETTINGS
+# =============================================================================
+
+# Setting for dev/qa/prod
+common_r2b_job_settings: &common_r2b_job_settings
+  <<: *r2b_job_base
+  email_notifications:
+    on_failure: ${var.notification_recipients}
+  notification_settings:
+    no_alert_for_skipped_runs: true
+  health:
+    rules:
+      - metric: "RUN_DURATION_SECONDS"
+        op: "GREATER_THAN"
+        value: 10800  # 3 hours
   job_clusters:
     - job_cluster_key: job_cluster
       new_cluster:
-        policy_id: ${var.scaled_job_cluster_policy_id}
-        spark_version: 15.4.x-scala2.12
-        node_type_id: Standard_D16as_v4
-        driver_node_type_id: Standard_D16as_v4
-        data_security_mode: USER_ISOLATION
-        autoscale:
-          min_workers: 1
-          max_workers: 4
-        azure_attributes:
-          availability: "SPOT_WITH_FALLBACK_AZURE"
-          first_on_demand: 1
-          spot_bid_max_price: -1
-        custom_tags:
-          product_department_team: "ELY"
-          project: "CO_energystack"
-  tasks:
-    - task_key: tsk_co2_ingest_excel
+        <<: *r2b_cluster_base
+        data_security_mode: SINGLE_USER
+
+  tasks: &r2b_tasks
+    - task_key: tsk_co2_ingest_parquet
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
-        python_file: ../src/_1_ingest/ingest_excel_to_bronze.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
-      libraries:
-        - pypi:
-            package: "polars[calamine]>=1.0"
+        python_file: ../src/_1_ingest/ingest_parquet_to_bronze.py
+        parameters: ${var.bronze_task_params}
+      timeout_seconds: 7200
 
+# Setting for integration test
+common_r2b_job_settings_int_test: &common_r2b_job_settings_int_test
+  <<: *r2b_job_base
+  job_clusters:
+    - job_cluster_key: job_cluster
+      new_cluster:
+        <<: *r2b_cluster_base
+        data_security_mode: USER_ISOLATION
+  tasks: *r2b_tasks
+
+# =============================================================================
+# TARGETS
+# =============================================================================
 targets:
   dev_user:
     resources:
       jobs:
         job_co2_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings
           name: job_co2_bronze
 
         job_co2_int_test_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings_int_test
           name: job_co2_int_test_bronze
 
   dev:
     resources:
       jobs:
         job_co2_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings
           name: job_co2_bronze
 
   qa:
     resources:
       jobs:
         job_co2_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings
           name: job_co2_bronze
 
   prod:
     resources:
       jobs:
         job_co2_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings
           name: job_co2_bronze
-          email_notifications:
-            on_failure:
-              - got4hc@bosch.com
-            no_alert_for_skipped_runs: true
 
   dev_integration_test:
     resources:
       jobs:
         job_co2_int_test_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings_int_test
           name: job_co2_int_test_bronze
 
   qa_integration_test:
     resources:
       jobs:
         job_co2_int_test_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings_int_test
           name: job_co2_int_test_bronze
 
   prod_integration_test:
     resources:
       jobs:
         job_co2_int_test_bronze:
-          <<: *common_bronze_job_settings
+          <<: *common_r2b_job_settings_int_test
           name: job_co2_int_test_bronze

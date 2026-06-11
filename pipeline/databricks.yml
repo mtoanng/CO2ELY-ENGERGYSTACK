@@ -1,6 +1,11 @@
 # Databricks Asset Bundle definition for co_energystack_pipeline.
-# Migration: CO_energystacck Dash app → production Databricks analytics pipeline.
+# CO₂ Electrolysis measurement data pipeline (XLSX/CSV → Parquet → Delta).
 # Architecture modeled on bosch_ely_adb_batch (TBP-ADB).
+#
+# Auth: cluster identity via run_as SP (sp-co2ely-energystack).
+# SP has Storage Blob Data Contributor on stpsbdodxdev2datalake.
+# Environment: auto-detected from workspace URL in Python code.
+# No credentials in YAML or job parameters.
 #
 # Repo: CO-ESTACK-ADB/co_energystack_pipeline/
 # See https://docs.databricks.com/dev-tools/bundles/index.html
@@ -11,10 +16,18 @@ bundle:
 include:
   - resources/*.yml
 
+# =============================================================================
+# VARIABLES (same pattern as TBP databricks.yml)
+# =============================================================================
 variables:
+  notification_recipients:
+    description: List of DE emails for alerts
+    type: complex
+    default:
+      - got4hc@bosch.com
   service_principal_id:
     lookup:
-      service_principal: "sp-pemely-databricks"
+      service_principal: "sp-co2ely-energystack"
   static_job_cluster_policy_id:
     lookup:
       cluster_policy: "Advanced job cluster without autoscaling"
@@ -28,6 +41,33 @@ variables:
     description: Location for integration test artifacts
     default: /Shared/ELY/${bundle.name}_integration_test
 
+  # --- Shared cluster settings ---
+  spark_version:
+    description: Spark runtime version for all job clusters
+    default: "15.4.x-scala2.12"
+  scaled_node_type:
+    description: Worker node type for autoscaled pipeline jobs
+    default: "Standard_D16as_v4"
+  scaled_driver_type:
+    description: Driver node type for autoscaled pipeline jobs
+    default: "Standard_D16as_v4"
+  static_node_type:
+    description: Node type for static single-node jobs (converter)
+    default: "Standard_D16as_v4"
+
+  # --- Per-layer task parameters (same as TBP) ---
+  bronze_task_params:
+    description: Bronze Auto Loader task parameters
+    type: complex
+    default:
+      - "--is_integration_test"
+      - "{{job.parameters.is_integration_test}}"
+      - "--env"
+      - "${bundle.environment}"
+
+# =============================================================================
+# TARGETS (same as TBP)
+# =============================================================================
 targets:
   dev_user:
     mode: development
@@ -36,19 +76,19 @@ targets:
       host: https://adb-1032635496032522.2.azuredatabricks.net
       root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/
 
-  dev:
-    mode: production
-    workspace:
-      host: https://adb-1032635496032522.2.azuredatabricks.net
-      root_path: ${var.artifact_location}
-    run_as:
-      service_principal_name: ${var.service_principal_id}
-
   dev_integration_test:
     mode: production
     workspace:
       host: https://adb-1032635496032522.2.azuredatabricks.net
       root_path: ${var.integration_test_artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  dev:
+    mode: production
+    workspace:
+      host: https://adb-1032635496032522.2.azuredatabricks.net
+      root_path: ${var.artifact_location}
     run_as:
       service_principal_name: ${var.service_principal_id}
 

@@ -1,37 +1,43 @@
 """CSV -> Parquet converter.
 
 Header logic (scan first 3 rows):
-  Row 1: col (identifier/description)
-  Row 2: col_name (DataFrame header)
-  Row 3: channel_unit if special chars detected, else first data row
+  Row 1: channel (original identifier) — used as join key in timeseries
+  Row 2: channel_name (display name)
+  Row 3: unit if special chars detected, else first data row
 
 Timeseries: wide->long melt (all columns), row index as sample_offset.
+DataFrame columns are named by ROW 1 (channel) so timeseries.channel = row1 values.
+
+I/O: Reads directly from UC Volume FUSE path (no JVM, no Py4J bridge).
+Polars reads CSV via Rust I/O — fastest possible path.
 """
-import io
 import polars as pl
 import pyarrow as pa
 from typing import List, Optional
 from datetime import datetime
 
 from common import (
-    SCHEMAS, ConversionResult, generic_unpivot,
+    SCHEMAS, ConversionResult, generic_unpivot, generate_file_uuid,
     build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,
 )
 
 
 def convert(
-    file_bytes: bytes,
     file_path: str,
     file_size: int,
     last_modified: Optional[datetime] = None,
 ) -> List[ConversionResult]:
-    """Convert a CSV file to 4 Parquet tables."""
-    buf = io.BytesIO(file_bytes)
+    """Convert a CSV file to 4 Parquet tables.
 
-    # Read first 3 rows raw (all string)
+    Reads directly from FUSE path — Polars uses Rust std::fs I/O.
+    No JVM, no Py4J, no BytesIO wrapping.
+    """
+    file_uuid = generate_file_uuid(file_path)
+
+    # Read first 3 rows raw (all string) — Polars reads FUSE path directly
     header_df = pl.read_csv(
-        buf, has_header=False, skip_rows=0, n_rows=3,
+        file_path, has_header=False, skip_rows=0, n_rows=3,
         infer_schema_length=0, ignore_errors=True,
     )
 
@@ -40,40 +46,59 @@ def convert(
         return []
 
     n_cols = header_df.shape[1]
-    row1_col = [str(header_df[c][0] or "") for c in header_df.columns]
-    row2_col_name = [str(header_df[c][1] or "") for c in header_df.columns]
-    row2_col_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_col_name)]
+    col_names = header_df.columns
 
+    # Row 1: channel (original identifier) — becomes timeseries.channel
+    row1_channel = [str(header_df[c][0] or "") for c in col_names]
+    # Row 2: channel_name (display name)
+    row2_channel_name = [str(header_df[c][1] or "") for c in col_names]
+    row2_channel_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_channel_name)]
+
+    # Ensure unique channel identifiers
+    seen = {}
+    unique_channels = []
+    for ch in row1_channel:
+        ch = ch.strip() if ch.strip() else "unnamed"
+        if ch in seen:
+            seen[ch] += 1
+            unique_channels.append(f"{ch}_{seen[ch]}")
+        else:
+            seen[ch] = 0
+            unique_channels.append(ch)
+    row1_channel = unique_channels
+
+    # Row 3: unit detection
     has_units = False
     units = [""] * n_cols
     if header_df.shape[0] >= 3:
-        row3_values = [str(header_df[c][2] or "") for c in header_df.columns]
+        row3_values = [str(header_df[c][2] or "") for c in col_names]
         has_units = detect_units_row(row3_values)
         if has_units:
             units = [v.strip() if v else "" for v in row3_values]
 
-    # Read data (skip header rows)
+    # Read data (skip header rows) — Polars reads directly from FUSE
     data_skip_rows = 3 if has_units else 2
-    buf.seek(0)
     df = pl.read_csv(
-        buf, has_header=False, skip_rows=data_skip_rows,
+        file_path, has_header=False, skip_rows=data_skip_rows,
         infer_schema_length=10_000, ignore_errors=True,
     )
 
     if df.is_empty():
         return []
 
-    rename_map = {df.columns[i]: row2_col_name[i] for i in range(min(len(df.columns), len(row2_col_name)))}
+    # Rename columns to ROW 1 (channel identifiers) — NOT row 2 (channel_name)
+    df_cols = df.columns
+    rename_map = {df_cols[i]: row1_channel[i] for i in range(min(len(df_cols), len(row1_channel)))}
     df = df.rename(rename_map)
-    columns = df.columns
+    columns = list(rename_map.values())
     n_rows = df.shape[0]
     n_channels = len(columns)
     group = "data"
 
-    filemeta = build_filemeta(file_path, file_size, last_modified)
-    channel = build_channel(file_path, group, row1_col, row2_col_name, units)
-    timeseries = generic_unpivot(df, file_path, group, columns)
-    statistics = build_statistics(file_path, group, n_channels, n_rows)
+    filemeta = build_filemeta(file_path, file_uuid, file_size, last_modified)
+    channel = build_channel(file_uuid, group, row1_channel, row2_channel_name, units)
+    timeseries = generic_unpivot(df, file_uuid, group, columns)
+    statistics = build_statistics(file_uuid, group, n_channels, n_rows)
 
     return [ConversionResult(
         tables={"filemeta": filemeta, "channel": channel,
