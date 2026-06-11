@@ -1,0 +1,27 @@
+# Databricks Asset Bundle artifacts
+.databricks/
+.bundle/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local test data
+*.xlsx
+*.parquet
+/data/

@@ -1,0 +1,85 @@
+# Databricks Asset Bundle definition for co_energystack_pipeline.
+# Migration: CO_energystacck Dash app → production Databricks analytics pipeline.
+# Architecture modeled on bosch_ely_adb_batch (TBP-ADB).
+#
+# Repo: CO-ESTACK-ADB/co_energystack_pipeline/
+# See https://docs.databricks.com/dev-tools/bundles/index.html
+
+bundle:
+  name: co_energystack_pipeline
+
+include:
+  - resources/*.yml
+
+variables:
+  service_principal_id:
+    lookup:
+      service_principal: "sp-pemely-databricks"
+  static_job_cluster_policy_id:
+    lookup:
+      cluster_policy: "Advanced job cluster without autoscaling"
+  scaled_job_cluster_policy_id:
+    lookup:
+      cluster_policy: "Advanced job cluster with autoscaling"
+  artifact_location:
+    description: Location of the deployed bundle artifacts
+    default: /Shared/ELY/${bundle.name}
+  integration_test_artifact_location:
+    description: Location for integration test artifacts
+    default: /Shared/ELY/${bundle.name}_integration_test
+
+targets:
+  dev_user:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-1032635496032522.2.azuredatabricks.net
+      root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}/
+
+  dev:
+    mode: production
+    workspace:
+      host: https://adb-1032635496032522.2.azuredatabricks.net
+      root_path: ${var.artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  dev_integration_test:
+    mode: production
+    workspace:
+      host: https://adb-1032635496032522.2.azuredatabricks.net
+      root_path: ${var.integration_test_artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  qa:
+    mode: production
+    workspace:
+      host: https://adb-7376334951991000.0.azuredatabricks.net
+      root_path: ${var.artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  qa_integration_test:
+    mode: production
+    workspace:
+      host: https://adb-7376334951991000.0.azuredatabricks.net
+      root_path: ${var.integration_test_artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  prod:
+    mode: production
+    workspace:
+      host: https://adb-5407587042408609.9.azuredatabricks.net
+      root_path: ${var.artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
+
+  prod_integration_test:
+    mode: production
+    workspace:
+      host: https://adb-5407587042408609.9.azuredatabricks.net
+      root_path: ${var.integration_test_artifact_location}
+    run_as:
+      service_principal_name: ${var.service_principal_id}
