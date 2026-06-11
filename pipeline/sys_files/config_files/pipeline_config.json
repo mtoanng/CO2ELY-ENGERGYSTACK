@@ -1,0 +1,26 @@
+{
+  "project": "co_energystack_pipeline",
+  "domain": "CO2 Electrolysis",
+  "medallion_layers": {
+    "_0_convert": {"read": "raw_volume", "write": "parquet_volume"},
+    "_1_ingest": {"read": "parquet_volume", "write": "bronze"},
+    "_2_enrich": {"read": "bronze", "write": "silver"},
+    "_3_gold": {"read": "silver", "write": "gold"}
+  },
+  "schemas": {
+    "converter": "converter",
+    "bronze": "bronze",
+    "silver": "silver",
+    "gold": "gold"
+  },
+  "volumes": {
+    "source": "raw_data",
+    "output": "parquet_raw"
+  },
+  "table_types": ["filemeta", "channel", "timeseries", "statistics"],
+  "supported_extensions": [".csv", ".xlsx", ".xls"],
+  "optimization": {
+    "schedule": "weekly",
+    "vacuum_retention_hours": 168
+  }
+}

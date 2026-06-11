@@ -9,14 +9,13 @@ Schema:
 - channel_name = ROW 2 (display name)
 - timeseries.channel references channel.channel (row 1) for joins
 
-I/O: Reads directly from UC Volume FUSE path (no JVM, no Py4J bridge).
+I/O: Receives raw bytes (downloaded by Azure SDK in worker).
 Polars + calamine engine (Rust-native parsing, releases GIL).
 Parallelism: Sheets are processed in parallel via ThreadPoolExecutor.
 """
 import io
 import polars as pl
 import pyarrow as pa
-from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,7 +29,7 @@ from common import (
 
 def _process_sheet(
     file_bytes: bytes,
-    file_path: str,
+    relative_path: str,
     file_uuid: str,
     file_size: int,
     sheet_name: str,
@@ -86,7 +85,6 @@ def _process_sheet(
         return None
 
     # Slice data rows and rename columns to ROW 1 (channel identifiers)
-    # This ensures generic_unpivot produces timeseries.channel = row1 values
     df = header_df.slice(data_start_row)
     df_cols = df.columns
     rename_map = {df_cols[i]: row1_channel[i]
@@ -100,7 +98,8 @@ def _process_sheet(
     if n_rows == 0:
         return None
 
-    filemeta = build_filemeta(file_path, file_uuid, file_size, last_modified)
+    # Use relative_path for filemeta (environment-independent, matches tracking table)
+    filemeta = build_filemeta(relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
     timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
@@ -113,44 +112,49 @@ def _process_sheet(
 
 
 def convert(
-    file_path: str,
+    file_bytes: bytes,
+    relative_path: str,
     file_size: int,
     last_modified: Optional[datetime] = None,
 ) -> List[ConversionResult]:
-    """Convert an XLSX file to 4 Parquet tables per sheet.
+    """Convert XLSX bytes to 4 Parquet tables per sheet.
 
-    Reads file directly from FUSE path (single kernel read, no JVM).
-    Sheets are processed in parallel threads. Each sheet:
-    - Reads from the same file_bytes (immutable, shared safely)
+    Args:
+        file_bytes: Raw file content (downloaded by Azure SDK in worker).
+        relative_path: Env-independent path for UUID + filemeta (join key).
+        file_size: File size in bytes.
+        last_modified: Blob modification timestamp.
+
+    Polars + calamine parses from BytesIO (Rust, releases GIL).
+    Sheets are processed in parallel threads:
+    - Each sheet reads from the same file_bytes (immutable, shared safely)
     - Produces independent ConversionResult (no shared state)
-    - Polars releases GIL → true parallel parsing + unpivot
     """
     import fastexcel
 
-    # Single FUSE read — file bytes stay in Python heap only (no JVM copy)
-    file_bytes = Path(file_path).read_bytes()
-    file_uuid = generate_file_uuid(file_path)
+    # UUID from relative_path (environment-independent, matches tracking table)
+    file_uuid = generate_file_uuid(relative_path)
 
-    # fastexcel for sheet name discovery
+    # fastexcel for sheet name discovery (reads from bytes)
     excel_file = fastexcel.read_excel(file_bytes)
     sheet_names = excel_file.sheet_names
 
     if len(sheet_names) <= 1:
-        # Single sheet → no threading overhead
+        # Single sheet -> no threading overhead
         results = []
         for sheet_name in sheet_names:
-            r = _process_sheet(file_bytes, file_path, file_uuid, file_size, sheet_name, last_modified)
+            r = _process_sheet(file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified)
             if r:
                 results.append(r)
         return results
 
-    # Multi-sheet → parallel processing
-    logger.info(f"  {file_path}: {len(sheet_names)} sheets → parallel processing")
+    # Multi-sheet -> parallel processing (Polars releases GIL)
+    logger.info(f"  {relative_path}: {len(sheet_names)} sheets -> parallel processing")
     results = []
     with ThreadPoolExecutor(max_workers=len(sheet_names)) as executor:
         futures = {
             executor.submit(
-                _process_sheet, file_bytes, file_path, file_uuid, file_size, sheet_name, last_modified
+                _process_sheet, file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified
             ): sheet_name
             for sheet_name in sheet_names
         }

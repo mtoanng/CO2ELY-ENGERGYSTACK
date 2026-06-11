@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "co-energystack-pipeline"
+version = "0.1.0"
+description = "CO2 Electrolysis Energystack - Databricks ETL Pipeline (Medallion Architecture)"
+requires-python = ">=3.11"
+
+# Runtime dependencies (installed on Databricks cluster via job libraries)
+dependencies = [
+    "polars[calamine]>=1.0",
+    "fastexcel>=0.11",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["common", "xlsx_converter", "csv_converter"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/_9_tests"]
+pythonpath = ["src/_0_convert", "src/_common"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

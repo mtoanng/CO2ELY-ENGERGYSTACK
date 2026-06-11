@@ -3,9 +3,10 @@
 # =============================================================================
 
 # --- Base cluster config ---
-# Single-node for dev (Polars on driver via local[*]).
-# Scale to multi-worker for production — Spark distributes files to executors,
-# each runs Polars natively via UC Volume FUSE (zero JVM overhead).
+# Scalable: num_workers=0 for dev (local[*]), increase for production.
+# Spark mapPartitions distributes files to executors.
+# Each executor: Azure SDK download → Polars parse → PyArrow → SDK upload.
+# Zero JVM involvement for file I/O.
 _converter_cluster_base: &converter_cluster_base
   policy_id: ${var.static_job_cluster_policy_id}
   spark_version: ${var.spark_version}
@@ -15,12 +16,37 @@ _converter_cluster_base: &converter_cluster_base
   spark_conf:
     spark.master: "local[*]"
     spark.databricks.cluster.profile: singleNode
+  spark_env_vars:
+    AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
+    AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
+    AZURE_CLIENT_SECRET: "{{secrets/co2ely-scope/sp-client-secret}}"
   azure_attributes:
     availability: "SPOT_WITH_FALLBACK_AZURE"
     first_on_demand: 1
     spot_bid_max_price: -1
   custom_tags:
     ResourceClass: SingleNode
+    product_department_team: "ELY"
+    project: "CO_energystack"
+
+# --- Scaled cluster for production (multi-worker) ---
+_converter_cluster_scaled: &converter_cluster_scaled
+  policy_id: ${var.scaled_job_cluster_policy_id}
+  spark_version: ${var.spark_version}
+  node_type_id: ${var.scaled_node_type}
+  driver_node_type_id: ${var.scaled_driver_type}
+  autoscale:
+    min_workers: 1
+    max_workers: 4
+  spark_env_vars:
+    AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
+    AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
+    AZURE_CLIENT_SECRET: "{{secrets/co2ely-scope/sp-client-secret}}"
+  azure_attributes:
+    availability: "SPOT_WITH_FALLBACK_AZURE"
+    first_on_demand: 1
+    spot_bid_max_price: -1
+  custom_tags:
     product_department_team: "ELY"
     project: "CO_energystack"
 
@@ -36,11 +62,30 @@ _converter_job_base: &converter_job_base
       level: "CAN_MANAGE"
   max_concurrent_runs: 1
 
+# --- Shared library set ---
+_converter_libs_xlsx: &converter_libs_xlsx
+  - pypi:
+      package: "polars[calamine]>=1.0"
+  - pypi:
+      package: "fastexcel"
+  - pypi:
+      package: "azure-storage-blob>=12.19"
+  - pypi:
+      package: "azure-identity>=1.15"
+
+_converter_libs_csv: &converter_libs_csv
+  - pypi:
+      package: "polars>=1.0"
+  - pypi:
+      package: "azure-storage-blob>=12.19"
+  - pypi:
+      package: "azure-identity>=1.15"
+
 # =============================================================================
 # COMPOSED JOB SETTINGS
 # =============================================================================
 
-# Setting for dev/qa/prod
+# Setting for dev (single-node)
 common_converter_job_settings: &common_converter_job_settings
   <<: *converter_job_base
   email_notifications:
@@ -59,8 +104,8 @@ common_converter_job_settings: &common_converter_job_settings
         data_security_mode: SINGLE_USER
 
   # Tasks run in PARALLEL (no depends_on between xlsx and csv).
-  # Auth: UC Managed Identity via FUSE mount. Zero credentials.
-  # I/O: Polars reads/writes directly to /Volumes/... (no JVM).
+  # Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
+  # I/O: Azure SDK (parallel HTTP download/upload, zero JVM).
   # Distribution: Spark mapPartitions (linear scaling with num_workers).
   tasks: &converter_tasks
     - task_key: tsk_co2_convert_xlsx
@@ -75,11 +120,7 @@ common_converter_job_settings: &common_converter_job_settings
           - "${bundle.environment}"
           - "--extensions"
           - ".xlsx,.xls"
-      libraries:
-        - pypi:
-            package: "polars[calamine]>=1.0"
-        - pypi:
-            package: "fastexcel"
+      libraries: *converter_libs_xlsx
       timeout_seconds: 3600
 
     - task_key: tsk_co2_convert_csv
@@ -94,10 +135,27 @@ common_converter_job_settings: &common_converter_job_settings
           - "${bundle.environment}"
           - "--extensions"
           - ".csv"
-      libraries:
-        - pypi:
-            package: "polars>=1.0"
+      libraries: *converter_libs_csv
       timeout_seconds: 3600
+
+# Setting for production (multi-worker, autoscale 1-4)
+common_converter_job_settings_prod: &common_converter_job_settings_prod
+  <<: *converter_job_base
+  email_notifications:
+    on_failure: ${var.notification_recipients}
+  notification_settings:
+    no_alert_for_skipped_runs: true
+  health:
+    rules:
+      - metric: "RUN_DURATION_SECONDS"
+        op: "GREATER_THAN"
+        value: 7200
+  job_clusters:
+    - job_cluster_key: job_cluster
+      new_cluster:
+        <<: *converter_cluster_scaled
+        data_security_mode: SINGLE_USER
+  tasks: *converter_tasks
 
 # Setting for integration test
 common_converter_job_settings_int_test: &common_converter_job_settings_int_test
@@ -142,7 +200,7 @@ targets:
     resources:
       jobs:
         job_co2_converter:
-          <<: *common_converter_job_settings
+          <<: *common_converter_job_settings_prod
           name: job_co2_converter
           schedule:
             quartz_cron_expression: "0 0/30 * * * ?"

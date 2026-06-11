@@ -8,9 +8,10 @@ Header logic (scan first 3 rows):
 Timeseries: wide->long melt (all columns), row index as sample_offset.
 DataFrame columns are named by ROW 1 (channel) so timeseries.channel = row1 values.
 
-I/O: Reads directly from UC Volume FUSE path (no JVM, no Py4J bridge).
-Polars reads CSV via Rust I/O — fastest possible path.
+I/O: Receives raw bytes (downloaded by Azure SDK in worker).
+Polars reads CSV from BytesIO — Rust I/O, fastest possible path.
 """
+import io
 import polars as pl
 import pyarrow as pa
 from typing import List, Optional
@@ -24,25 +25,32 @@ from common import (
 
 
 def convert(
-    file_path: str,
+    file_bytes: bytes,
+    relative_path: str,
     file_size: int,
     last_modified: Optional[datetime] = None,
 ) -> List[ConversionResult]:
-    """Convert a CSV file to 4 Parquet tables.
+    """Convert CSV bytes to 4 Parquet tables.
 
-    Reads directly from FUSE path — Polars uses Rust std::fs I/O.
-    No JVM, no Py4J, no BytesIO wrapping.
+    Args:
+        file_bytes: Raw file content (downloaded by Azure SDK in worker).
+        relative_path: Env-independent path for UUID + filemeta (join key).
+        file_size: File size in bytes.
+        last_modified: Blob modification timestamp.
+
+    Polars reads from BytesIO (Rust I/O). No JVM, no Py4J.
     """
-    file_uuid = generate_file_uuid(file_path)
+    # UUID from relative_path (environment-independent, matches tracking table)
+    file_uuid = generate_file_uuid(relative_path)
 
-    # Read first 3 rows raw (all string) — Polars reads FUSE path directly
+    # Read first 3 rows raw (all string) — for header analysis
     header_df = pl.read_csv(
-        file_path, has_header=False, skip_rows=0, n_rows=3,
+        io.BytesIO(file_bytes), has_header=False, skip_rows=0, n_rows=3,
         infer_schema_length=0, ignore_errors=True,
     )
 
     if header_df.shape[0] < 2:
-        logger.warning(f"  {file_path}: less than 2 rows, skipping")
+        logger.warning(f"  {relative_path}: less than 2 rows, skipping")
         return []
 
     n_cols = header_df.shape[1]
@@ -76,10 +84,10 @@ def convert(
         if has_units:
             units = [v.strip() if v else "" for v in row3_values]
 
-    # Read data (skip header rows) — Polars reads directly from FUSE
+    # Read data (skip header rows) — Polars reads from BytesIO
     data_skip_rows = 3 if has_units else 2
     df = pl.read_csv(
-        file_path, has_header=False, skip_rows=data_skip_rows,
+        io.BytesIO(file_bytes), has_header=False, skip_rows=data_skip_rows,
         infer_schema_length=10_000, ignore_errors=True,
     )
 
@@ -95,7 +103,8 @@ def convert(
     n_channels = len(columns)
     group = "data"
 
-    filemeta = build_filemeta(file_path, file_uuid, file_size, last_modified)
+    # Use relative_path for filemeta (environment-independent, matches tracking table)
+    filemeta = build_filemeta(relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, group, row1_channel, row2_channel_name, units)
     timeseries = generic_unpivot(df, file_uuid, group, columns)
     statistics = build_statistics(file_uuid, group, n_channels, n_rows)

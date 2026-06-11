@@ -2,20 +2,22 @@
 # REUSABLE COMPONENTS
 # =============================================================================
 
-# --- Base cluster config (autoscaled for streaming ingest) ---
+# --- Base cluster config (single-node for Parquet → Delta ingest) ---
 _r2b_cluster_base: &r2b_cluster_base
-  policy_id: ${var.scaled_job_cluster_policy_id}
+  policy_id: ${var.static_job_cluster_policy_id}
   spark_version: ${var.spark_version}
-  node_type_id: ${var.scaled_node_type}
-  driver_node_type_id: ${var.scaled_driver_type}
-  autoscale:
-    min_workers: 1
-    max_workers: 4
+  node_type_id: ${var.static_node_type}
+  driver_node_type_id: ${var.static_node_type}
+  num_workers: 0
+  spark_conf:
+    spark.master: "local[*]"
+    spark.databricks.cluster.profile: singleNode
   azure_attributes:
     availability: "SPOT_WITH_FALLBACK_AZURE"
     first_on_demand: 1
     spot_bid_max_price: -1
   custom_tags:
+    ResourceClass: SingleNode
     product_department_team: "ELY"
     project: "CO_energystack"
 
@@ -53,13 +55,20 @@ common_r2b_job_settings: &common_r2b_job_settings
         <<: *r2b_cluster_base
         data_security_mode: SINGLE_USER
 
+  # Bronze ingest: reads converter Parquet output → Delta tables.
+  # Queries converter tracking table for SUCCESS records not yet ingested.
+  # Auth: UC Managed Identity via FUSE mount (same as converter).
   tasks: &r2b_tasks
     - task_key: tsk_co2_ingest_parquet
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
         python_file: ../src/_1_ingest/ingest_parquet_to_bronze.py
-        parameters: ${var.bronze_task_params}
+        parameters:
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
       timeout_seconds: 7200
 
 # Setting for integration test
