@@ -1,10 +1,13 @@
 """Shared utilities for the CO₂ energystack pipeline.
 
-Migrated from CO_energystacck Dash app patterns + bosch_ely_adb_batch conventions:
+Conventions (same as TBP bosch_ely_adb_batch):
 - Environment detection (dev/qa/prod) via workspace host
 - Medallion layer variables (catalog, schema, ADLS paths)
 - Argument parsing for job parameters
 - Structured logging
+
+IMPORTANT: This module is used by _2_enrich and _3_gold layers.
+The _0_convert and _1_ingest layers use their own `_0_convert/common.py`.
 """
 
 import argparse
@@ -15,54 +18,65 @@ import sys
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
-# Environment configuration (mirrors bosch_ely_adb_batch pattern)
+# Environment configuration (CO2ELY project)
 # ---------------------------------------------------------------------------
 
 ENVIRONMENT_VARIABLES = {
     "adb-1032635496032522.2.azuredatabricks.net": {
         "environment": "dev",
-        "adls_domain": "stpsbdodxdevdatalake.dfs.core.windows.net",
-        "unity_catalog": "ps_xplatform_dev",
+        "adls_domain": "stpsbdodxdev2datalake.dfs.core.windows.net",
+        "storage_account": "stpsbdodxdev2datalake",
+        "container": "co2elyd-data",
+        "unity_catalog": "co2elyd_dev",
     },
     "adb-7376334951991000.0.azuredatabricks.net": {
         "environment": "qa",
         "adls_domain": "stpsbdodxqadatalake.dfs.core.windows.net",
-        "unity_catalog": "ps_xplatform_qa",
+        "storage_account": "stpsbdodxqadatalake",
+        "container": "co2elyd-data",
+        "unity_catalog": "co2elyd_qa",
     },
     "adb-5407587042408609.9.azuredatabricks.net": {
         "environment": "prod",
         "adls_domain": "stpsbdodxproddatalake.dfs.core.windows.net",
-        "unity_catalog": "ps_xplatform_prod",
+        "storage_account": "stpsbdodxproddatalake",
+        "container": "co2elyd-data",
+        "unity_catalog": "co2elyd_prod",
     },
     "local": {
         "environment": "local",
         "adls_domain": None,
+        "storage_account": None,
+        "container": None,
         "unity_catalog": None,
     },
 }
 
-# Medallion layer config
-# NOTE: Update uc_schema values when CO₂ gets its own schema
+# Medallion layer config (CO2ELY schemas)
 MEDALLION_VARIABLES = {
     "raw": {
-        "adls_container": "pemely-data",
-        "uc_schema": None,
+        "adls_container": "co2elyd-data",
+        "adls_prefix": "raw_data",
+        "uc_schema": None,  # raw lives in UC Volume / ADLS only
         "table_prefix": "raw",
     },
     "bronze": {
-        "adls_container": "pemely-dev",
-        "uc_schema": "pemely_dev",
-        "table_prefix": "bronze",
+        "adls_container": "co2elyd-data",
+        "adls_prefix": "parquet_raw",
+        "uc_schema": "bronze",
+        "table_prefix": "co2",
     },
     "silver": {
-        "adls_container": "pemely-dev",
-        "uc_schema": "pemely_dev",
-        "table_prefix": "silver",
+        "adls_container": "co2elyd-data",
+        "adls_prefix": "silver",
+        "uc_schema": "silver",
+        "table_prefix": "co2",
     },
     "gold": {
-        "adls_container": "pemely-ops",
-        "uc_schema": "pemely_ops",
-        "table_prefix": "gold",
+        "adls_container": "co2elyd-data",
+        "adls_prefix": "gold",
+        "uc_schema": "gold",
+        "table_prefix": "co2",
     },
 }
 
@@ -126,7 +140,7 @@ def env_variables(spark: SparkSession, env_override: str = None) -> dict:
         env_override: Optional explicit environment name (from --env arg).
 
     Returns:
-        Dict with keys: environment, adls_domain, unity_catalog.
+        Dict with keys: environment, adls_domain, storage_account, container, unity_catalog.
     """
     if env_override and env_override != "dev":
         for _host, config in ENVIRONMENT_VARIABLES.items():
@@ -149,7 +163,7 @@ def medallion_variables(layer: str) -> dict:
         layer: One of 'raw', 'bronze', 'silver', 'gold'.
 
     Returns:
-        Dict with adls_container, uc_schema, table_prefix.
+        Dict with adls_container, adls_prefix, uc_schema, table_prefix.
     """
     return MEDALLION_VARIABLES[layer]
 
@@ -176,13 +190,13 @@ def build_table_name(
     """Build a fully qualified Unity Catalog table name.
 
     Pattern: {catalog}.{schema}.{prefix}_{table}[_int_test]
-    Example: ps_xplatform_dev.pemely_dev.bronze_co2_timeseries
+    Example: co2elyd_dev.bronze.co2_timeseries
 
     Args:
-        unity_catalog: Catalog name.
-        schema: Schema name.
-        prefix: Medallion prefix (bronze/silver/gold).
-        table: Table base name.
+        unity_catalog: Catalog name (e.g. co2elyd_dev).
+        schema: Schema name (e.g. bronze, silver, gold).
+        prefix: Table prefix (e.g. co2).
+        table: Table base name (e.g. timeseries).
         is_integration_test: If True, appends '_int_test' suffix.
 
     Returns:
@@ -190,3 +204,17 @@ def build_table_name(
     """
     suffix = "_int_test" if is_integration_test else ""
     return f"{unity_catalog}.{schema}.{prefix}_{table}{suffix}"
+
+
+def build_abfss_path(storage_account: str, container: str, path: str) -> str:
+    """Build abfss:// URI for ADLS access via UC External Location.
+
+    Args:
+        storage_account: e.g. "stpsbdodxdev2datalake"
+        container: e.g. "co2elyd-data"
+        path: blob path within container
+
+    Returns:
+        Full abfss:// URI.
+    """
+    return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{path}"

@@ -6,10 +6,11 @@ as the source of truth — only ingests files with status='SUCCESS' that
 haven't been ingested into bronze yet.
 
 Architecture:
-- Reads directly from UC Volume FUSE paths (same as converter output)
+- Reads Parquet from ADLS via abfss:// (External Location + UC credential vending)
 - Spark reads Parquet natively (no Polars needed at this stage)
 - Writes to 4 Delta tables: filemeta, channel, timeseries, statistics
 - Tracks its own bronze watermark to avoid re-ingesting
+- No Azure SDK credentials needed — UC External Location handles auth
 
 Tables written:
   {catalog}.bronze.co2_filemeta
@@ -38,7 +39,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp, lit
 
 from common import (
-    get_env_variables, get_volume_paths, TABLE_TYPES, logger,
+    get_env_variables, get_adls_config, TABLE_TYPES, logger,
 )
 
 
@@ -73,6 +74,15 @@ def get_bronze_tracking_table(catalog: str, is_integration_test: bool) -> str:
     return f"{catalog}.{BRONZE_SCHEMA}.{BRONZE_TRACKING_TABLE_SUFFIX}{suffix}"
 
 
+def build_abfss_path(storage_account: str, container: str, blob_path: str) -> str:
+    """Build abfss:// URI for reading Parquet from ADLS.
+
+    Uses UC External Location for auth (credential vending, zero secrets).
+    Example: abfss://co2elyd-data@stpsbdodxdev2datalake.dfs.core.windows.net/parquet_raw/timeseries/file.parquet
+    """
+    return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{blob_path}"
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -95,20 +105,25 @@ def main():
     # Auto-detect environment
     env_vars = get_env_variables(spark)
     catalog = env_vars["unity_catalog"]
-    logger.info(f"Environment: {env_vars['environment']}, Catalog: {catalog}")
+    adls_config = get_adls_config(env_vars)
+    storage_account = adls_config["storage_account"]
+    container = adls_config["container"]
+    output_prefix = adls_config["output_prefix"]
+    converter_tracking = adls_config["tracking_table"]
 
-    # Resolve paths
-    vol_paths = get_volume_paths(catalog)
-    output_dir = vol_paths["output_dir"]  # /Volumes/.../parquet_raw (converter output)
-    converter_tracking = vol_paths["tracking_table"]
     if is_integration_test:
-        converter_tracking = converter_tracking.replace("file_tracking", "tmp_int_test_file_tracking")
+        converter_tracking = converter_tracking.replace("file_tracking", "file_tracking_int_test")
+        output_prefix = f"{output_prefix}/_int_test"
 
     bronze_tracking = get_bronze_tracking_table(catalog, is_integration_test)
 
-    logger.info(f"Converter output: {output_dir}")
-    logger.info(f"Converter tracking: {converter_tracking}")
-    logger.info(f"Bronze tracking: {bronze_tracking}")
+    logger.info(f"{'='*60}")
+    logger.info(f"ELY Bronze Ingestion")
+    logger.info(f"  Environment: {env_vars['environment']}, Catalog: {catalog}")
+    logger.info(f"  Storage: {storage_account}/{container}/{output_prefix}")
+    logger.info(f"  Converter tracking: {converter_tracking}")
+    logger.info(f"  Bronze tracking: {bronze_tracking}")
+    logger.info(f"{'='*60}")
 
     # =========================================================================
     # STEP 1: Ensure bronze schema + tracking table exist
@@ -165,7 +180,7 @@ def main():
     logger.info(f"New files to ingest into bronze: {len(new_records_list)}")
 
     # =========================================================================
-    # STEP 3: Read Parquet files and write to Delta (per table_type)
+    # STEP 3: Read Parquet from ADLS (abfss://) and write to Delta
     # =========================================================================
     total_rows = {}
     tracking_records = []
@@ -178,9 +193,11 @@ def main():
         for row in new_records_list:
             output_paths = json.loads(row.output_paths) if row.output_paths else {}
             if table_type in output_paths:
-                # output_paths stores relative path: "timeseries/filename.parquet"
-                fuse_path = f"{output_dir}/{output_paths[table_type]}"
-                parquet_paths.append(fuse_path)
+                # output_paths stores relative: "timeseries/filename.parquet"
+                # Reconstruct full abfss:// path using External Location
+                blob_path = f"{output_prefix}/{output_paths[table_type]}"
+                abfss_path = build_abfss_path(storage_account, container, blob_path)
+                parquet_paths.append(abfss_path)
 
         if not parquet_paths:
             logger.info(f"  {table_type}: no Parquet files to ingest")
@@ -188,17 +205,26 @@ def main():
             continue
 
         # Read all Parquet files for this table_type in one shot
+        # Auth: UC External Location + credential vending (zero secrets needed)
         logger.info(f"  {table_type}: reading {len(parquet_paths)} Parquet file(s)")
         df = spark.read.parquet(*parquet_paths)
 
         # Add ingestion metadata
         df = df.withColumn("_bronze_ingested_at", current_timestamp())
 
-        row_count = df.count()
-        total_rows[table_type] = row_count
-
         # Write to Delta (append mode — incremental)
+        # saveAsTable auto-creates on first run, appends on subsequent
         df.write.format("delta").mode("append").saveAsTable(bronze_table)
+
+        # Get row count from Delta table history (no extra scan)
+        try:
+            last_op = spark.sql(
+                f"DESCRIBE HISTORY {bronze_table} LIMIT 1"
+            ).select("operationMetrics").collect()[0][0]
+            row_count = int(last_op.get("numOutputRows", 0)) if last_op else 0
+        except Exception:
+            row_count = 0
+        total_rows[table_type] = row_count
         logger.info(f"  {table_type}: wrote {row_count:,} rows to {bronze_table}")
 
         # Track each file's contribution
@@ -206,17 +232,18 @@ def main():
             output_paths = json.loads(row.output_paths) if row.output_paths else {}
             if table_type in output_paths:
                 tracking_records.append((
-                    row.file_uuid, row.blob_path, table_type, bronze_table,
+                    row.file_uuid, row.blob_path, table_type, bronze_table, row_count,
                 ))
 
     # =========================================================================
     # STEP 4: Update bronze tracking table
     # =========================================================================
     if tracking_records:
-        from pyspark.sql import Row
+        from pyspark.sql import Row as SparkRow
         tracking_rows = [
-            Row(file_uuid=r[0], blob_path=r[1], table_type=r[2],
-                bronze_table=r[3], rows_written=0, ingested_at=datetime.now(tz=timezone.utc))
+            SparkRow(file_uuid=r[0], blob_path=r[1], table_type=r[2],
+                     bronze_table=r[3], rows_written=r[4],
+                     ingested_at=datetime.now(tz=timezone.utc))
             for r in tracking_records
         ]
         tracking_df = spark.createDataFrame(tracking_rows)

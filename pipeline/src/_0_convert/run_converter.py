@@ -25,7 +25,9 @@ Scalability:
 - Linear scaling: 4 workers × 16 cores = process 64 files concurrently
 
 Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
-Workers read os.environ — no dbutils needed inside mapPartitions.
+Workers read os.environ["AZURE_*"] — set at cluster init, available on ALL nodes.
+ADLS config (storage_account, container, output_prefix) passed via DataFrame columns
+to ensure propagation to remote executors.
 """
 import os
 import sys
@@ -77,6 +79,10 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
     3. Parses with Polars (Rust, zero GIL contention)
     4. Writes Parquet via PyArrow → bytes → SDK upload
 
+    ADLS config (storage_account, container, output_prefix) is passed as
+    columns in each Row — NOT via os.environ (which isn't propagated to
+    remote executors in multi-worker mode).
+
     Lazy imports inside worker (addPyFile compatibility + clean isolation).
     """
     # Lazy imports — only loaded on workers that actually process data
@@ -87,26 +93,29 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
     from xlsx_converter import convert as convert_xlsx
     from csv_converter import convert as convert_csv
 
-    # Read ADLS config from environment (broadcast or env vars)
-    storage_account = os.environ.get("CONVERTER_STORAGE_ACCOUNT", "")
-    container = os.environ.get("CONVERTER_CONTAINER", "")
-    output_prefix = os.environ.get("CONVERTER_OUTPUT_PREFIX", "parquet_raw")
-
-    # Create per-worker SDK client (thread-safe, connection pooled)
-    blob_client = get_blob_service_client(storage_account)
-    container_client = blob_client.get_container_client(container)
-
-    # Create per-worker Parquet writer
-    writer = ParquetWriter(storage_account, container, output_prefix)
+    # Per-partition state (lazy init on first row)
+    sdk_client = None
+    container_client = None
+    writer = None
 
     for row in rows:
         t0 = time.time()
-        blob_path = row.blob_path       # e.g. "raw_data/subdir/file.xlsx"
-        relative_path = row.relative_path  # e.g. "subdir/file.xlsx"
+        blob_path = row.blob_path        # e.g. "raw_data/subdir/file.xlsx"
+        relative_path = row.relative_path # e.g. "subdir/file.xlsx"
         file_name = row.file_name
         file_size = row.file_size
         last_modified = row.last_modified
         extension = row.extension
+        # ADLS config carried per-row (propagated to remote workers)
+        storage_account = row.storage_account
+        container = row.container
+        output_prefix = row.output_prefix
+
+        # Lazy init SDK client (once per partition, reused across rows)
+        if sdk_client is None:
+            sdk_client = get_blob_service_client(storage_account)
+            container_client = sdk_client.get_container_client(container)
+            writer = ParquetWriter(storage_account, container, output_prefix)
 
         try:
             # --- DOWNLOAD (Azure SDK — parallel HTTP chunks, zero JVM) ---
@@ -229,12 +238,9 @@ def main():
         return
 
     # --- 3. Distribute to workers via Spark ---
-    # Set ADLS config as env vars for workers (mapPartitions can't access spark conf)
-    os.environ["CONVERTER_STORAGE_ACCOUNT"] = storage_account
-    os.environ["CONVERTER_CONTAINER"] = container
-    os.environ["CONVERTER_OUTPUT_PREFIX"] = output_prefix
-
-    # Build input DataFrame (one row per file)
+    # ADLS config is passed as columns in the DataFrame (NOT via os.environ).
+    # os.environ on driver is NOT propagated to remote executors in multi-worker.
+    # AZURE_* creds are set via spark_env_vars at cluster init → available everywhere.
     file_rows = [
         Row(
             blob_path=b.blob_path,
@@ -243,22 +249,19 @@ def main():
             file_size=b.file_size,
             last_modified=b.last_modified,
             extension=b.extension,
+            # ADLS config carried per-row for worker access
+            storage_account=storage_account,
+            container=container,
+            output_prefix=output_prefix,
         )
         for b in new_blobs
     ]
 
     # Determine partition count (scale with cluster size)
-    try:
-        sc = spark.sparkContext
-        num_executors = max(sc._jsc.sc().getExecutorMemoryStatus().size() - 1, 1)
-        cores_per_executor = int(sc.getConf().get("spark.executor.cores", "4"))
-        num_partitions = min(len(new_blobs), num_executors * cores_per_executor)
-    except Exception:
-        num_partitions = min(len(new_blobs), 16)
-
+    num_partitions = min(len(new_blobs), spark.sparkContext.defaultParallelism)
     logger.info(f"Partitions: {num_partitions} (for {len(new_blobs)} files)")
 
-    # Distribute addPyFile for worker imports
+    # Distribute source modules for worker imports
     src_dir = Path(__file__).resolve().parent
     for module_file in ["common.py", "xlsx_converter.py", "csv_converter.py"]:
         module_path = str(src_dir / module_file)
