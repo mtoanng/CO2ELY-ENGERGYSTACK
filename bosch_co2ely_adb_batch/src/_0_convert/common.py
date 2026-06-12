@@ -108,6 +108,16 @@ def get_adls_config(env_vars: dict) -> dict:
     }
 
 
+def build_abfss_path(storage_account: str, container: str, blob_path: str) -> str:
+    """Construct full abfss:// URI from components.
+
+    Example:
+        build_abfss_path("stpsbdodxdev2datalake", "co2elyd-data", "raw_data/sub/file.xlsx")
+        → "abfss://co2elyd-data@stpsbdodxdev2datalake.dfs.core.windows.net/raw_data/sub/file.xlsx"
+    """
+    return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{blob_path}"
+
+
 # =============================================================================
 # AZURE SDK CLIENT FACTORY (worker-safe)
 # =============================================================================

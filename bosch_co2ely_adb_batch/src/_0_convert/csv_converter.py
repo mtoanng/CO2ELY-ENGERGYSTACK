@@ -29,14 +29,16 @@ def convert(
     relative_path: str,
     file_size: int,
     last_modified: Optional[datetime] = None,
+    abfss_file_path: Optional[str] = None,
 ) -> List[ConversionResult]:
     """Convert CSV bytes to 4 Parquet tables.
 
     Args:
         file_bytes: Raw file content (downloaded by Azure SDK in worker).
-        relative_path: Env-independent path for UUID + filemeta (join key).
+        relative_path: Env-independent path for UUID generation.
         file_size: File size in bytes.
         last_modified: Blob modification timestamp.
+        abfss_file_path: Full abfss:// URI stored in filemeta.file_path.
 
     Polars reads from BytesIO (Rust I/O). No JVM, no Py4J.
     """
@@ -103,8 +105,8 @@ def convert(
     n_channels = len(columns)
     group = "data"
 
-    # Use relative_path for filemeta (environment-independent, matches tracking table)
-    filemeta = build_filemeta(relative_path, file_uuid, file_size, last_modified)
+    # file_path: full abfss:// URI if available, else relative_path
+    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, group, row1_channel, row2_channel_name, units)
     timeseries = generic_unpivot(df, file_uuid, group, columns)
     statistics = build_statistics(file_uuid, group, n_channels, n_rows)

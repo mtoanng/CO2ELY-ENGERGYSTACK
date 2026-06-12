@@ -164,10 +164,13 @@ def _process_single_file(
             file_bytes = blob.download_blob(max_concurrency=4).readall()
 
             # --- PARSE (Polars + calamine — Rust, releases GIL) ---
+            # Full abfss:// path for filemeta.file_path (downstream traceability)
+            abfss_path = build_abfss_path(row.storage_account, row.container, blob_path)
+
             if extension in (".xlsx", ".xls"):
-                results = convert_xlsx(file_bytes, relative_path, file_size, last_modified)
+                results = convert_xlsx(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
             elif extension == ".csv":
-                results = convert_csv(file_bytes, relative_path, file_size, last_modified)
+                results = convert_csv(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
             else:
                 raise ValueError(f"Unsupported extension: {extension}")
 
@@ -251,7 +254,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
     # Lazy imports — only loaded on workers that actually process data
     from common import (
         get_blob_service_client, generate_file_uuid, sanitize_name,
-        ParquetWriter, logger,
+        build_abfss_path, ParquetWriter, logger,
     )
     from xlsx_converter import convert as convert_xlsx
     from csv_converter import convert as convert_csv

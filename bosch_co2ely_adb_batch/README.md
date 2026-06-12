@@ -22,19 +22,19 @@ UC Volume (.xlsx uploads)
     │
     ▼ _1_ingest (Polars calamine)
 ┌─────────────────────┐
-│  Bronze Delta Table  │  bronze_co2_timeseries
+│  Bronze Delta Table │  bronze_co2_timeseries
 └─────────────────────┘
     │
     ▼ _2_enrich (Polars)
 ┌─────────────────────┐
-│  Silver Enriched     │  silver_co2_timeseries_enriched (12 metrics)
-│  Silver Aggregated   │  silver_co2_timeseries_aggregated (15-min bins)
+│  Silver Enriched    │  silver_co2_timeseries_enriched (12 metrics)
+│  Silver Aggregated  │  silver_co2_timeseries_aggregated (15-min bins)
 └─────────────────────┘
     │
     ▼ _3_gold
 ┌─────────────────────┐
-│  Gold Summary        │  gold_co2_summary_statistics (KPIs)
-│  Gold Dashboard      │  gold_co2_timeseries_dashboard (chart data)
+│  Gold Summary       │  gold_co2_summary_statistics (KPIs)
+│  Gold Dashboard     │  gold_co2_timeseries_dashboard (chart data)
 └─────────────────────┘
 ```
 

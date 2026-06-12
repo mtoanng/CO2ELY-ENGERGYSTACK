@@ -34,6 +34,7 @@ def _process_sheet(
     file_size: int,
     sheet_name: str,
     last_modified: Optional[datetime],
+    abfss_file_path: Optional[str] = None,
 ) -> Optional[ConversionResult]:
     """Process a single sheet. Thread-safe (no shared mutable state)."""
     try:
@@ -98,8 +99,8 @@ def _process_sheet(
     if n_rows == 0:
         return None
 
-    # Use relative_path for filemeta (environment-independent, matches tracking table)
-    filemeta = build_filemeta(relative_path, file_uuid, file_size, last_modified)
+    # file_path: full abfss:// URI if available, else relative_path
+    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
     timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
@@ -116,14 +117,16 @@ def convert(
     relative_path: str,
     file_size: int,
     last_modified: Optional[datetime] = None,
+    abfss_file_path: Optional[str] = None,
 ) -> List[ConversionResult]:
     """Convert XLSX bytes to 4 Parquet tables per sheet.
 
     Args:
         file_bytes: Raw file content (downloaded by Azure SDK in worker).
-        relative_path: Env-independent path for UUID + filemeta (join key).
+        relative_path: Env-independent path for UUID generation.
         file_size: File size in bytes.
         last_modified: Blob modification timestamp.
+        abfss_file_path: Full abfss:// URI stored in filemeta.file_path.
 
     Polars + calamine parses from BytesIO (Rust, releases GIL).
     Sheets are processed in parallel threads:
@@ -143,7 +146,7 @@ def convert(
         # Single sheet -> no threading overhead
         results = []
         for sheet_name in sheet_names:
-            r = _process_sheet(file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified)
+            r = _process_sheet(file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified, abfss_file_path)
             if r:
                 results.append(r)
         return results
@@ -154,7 +157,7 @@ def convert(
     with ThreadPoolExecutor(max_workers=len(sheet_names)) as executor:
         futures = {
             executor.submit(
-                _process_sheet, file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified
+                _process_sheet, file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified, abfss_file_path
             ): sheet_name
             for sheet_name in sheet_names
         }
