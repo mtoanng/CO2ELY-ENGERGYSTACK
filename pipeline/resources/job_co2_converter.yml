@@ -16,6 +16,10 @@ _converter_cluster_base: &converter_cluster_base
   spark_conf:
     spark.master: "local[*]"
     spark.databricks.cluster.profile: singleNode
+    # Each Spark task spawns THREADS_PER_PARTITION(4) threads internally.
+    # spark.task.cpus tells Spark how many cores each task actually uses,
+    # so it schedules correctly (16 cores / 4 cpus = 4 concurrent tasks).
+    spark.task.cpus: "4"
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
@@ -30,6 +34,11 @@ _converter_cluster_base: &converter_cluster_base
     project: "CO_energystack"
 
 # --- Scaled cluster for production (multi-worker) ---
+# Autoscale: Spark scheduler requests more workers as pending tasks grow.
+# spark.task.cpus=4 ensures correct scheduling:
+#   D16as_v4 (16 cores) → 4 concurrent tasks per worker
+#   Each task runs ThreadPoolExecutor(4) → 16 threads = 16 cores fully used
+# Example: 100 files / 10 per partition = 10 tasks / 4 per worker = 3 workers
 _converter_cluster_scaled: &converter_cluster_scaled
   policy_id: ${var.scaled_job_cluster_policy_id}
   spark_version: ${var.spark_version}
@@ -38,6 +47,8 @@ _converter_cluster_scaled: &converter_cluster_scaled
   autoscale:
     min_workers: 1
     max_workers: 4
+  spark_conf:
+    spark.task.cpus: "4"
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
@@ -106,7 +117,8 @@ common_converter_job_settings: &common_converter_job_settings
   # Tasks run in PARALLEL (no depends_on between xlsx and csv).
   # Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
   # I/O: Azure SDK (parallel HTTP download/upload, zero JVM).
-  # Distribution: Spark mapPartitions (linear scaling with num_workers).
+  # Distribution: Spark mapPartitions + ThreadPoolExecutor per partition.
+  # Scheduling: spark.task.cpus=4 aligns Spark slots with actual thread usage.
   tasks: &converter_tasks
     - task_key: tsk_co2_convert_xlsx
       run_if: "ALL_SUCCESS"

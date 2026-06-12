@@ -49,7 +49,6 @@ if not logger.handlers:
 # ENVIRONMENT CONFIG (same pattern as TBP common_utils.py)
 # =============================================================================
 
-# Auto-detect environment from Databricks workspace URL
 ENVIRONMENT_CONFIG = {
     "adb-1032635496032522.2.azuredatabricks.net": {
         "environment": "dev",
@@ -71,7 +70,6 @@ ENVIRONMENT_CONFIG = {
     },
 }
 
-# Blob prefixes within the container (source/output)
 CONVERTER_CONFIG = {
     "schema": "converter",
     "source_prefix": "raw_data",
@@ -98,15 +96,7 @@ def get_env_variables(spark) -> dict:
 
 
 def get_adls_config(env_vars: dict) -> dict:
-    """Resolve ADLS blob paths for the current environment.
-
-    Returns:
-        storage_account: e.g. "stpsbdodxdev2datalake"
-        container: e.g. "co2elyd-data"
-        source_prefix: e.g. "raw_data"
-        output_prefix: e.g. "parquet_raw"
-        tracking_table: e.g. "co2elyd_dev.converter.file_tracking"
-    """
+    """Resolve ADLS blob paths for the current environment."""
     catalog = env_vars["unity_catalog"]
     schema = CONVERTER_CONFIG["schema"]
     return {
@@ -144,17 +134,11 @@ def get_blob_service_client(storage_account: str = None):
 # UUID GENERATION (deterministic from relative blob path)
 # =============================================================================
 
-# Namespace UUID for CO2ELY project (fixed, used as UUID5 namespace)
 _CO2ELY_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 
 def generate_file_uuid(relative_path: str) -> str:
-    """Generate deterministic UUID from relative blob path.
-
-    Same path always produces same UUID (UUID5 = SHA-1 based).
-    This is the join key across filemeta, channel, timeseries, and statistics.
-    Uses relative_path (environment-independent) so UUID is stable across dev/qa/prod.
-    """
+    """Generate deterministic UUID from relative blob path."""
     return str(uuid.uuid5(_CO2ELY_NAMESPACE, relative_path))
 
 
@@ -263,23 +247,18 @@ SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 
 def list_source_blobs(storage_account: str, container: str, source_prefix: str) -> List[BlobInfo]:
-    """List source blobs via Azure SDK (ContainerClient.list_blobs).
-
-    Parallel HTTP pagination, no JVM, no Hadoop FS.
-    Returns only supported file extensions.
-    """
+    """List source blobs via Azure SDK (ContainerClient.list_blobs)."""
     client = get_blob_service_client(storage_account)
     container_client = client.get_container_client(container)
 
     results = []
     for blob in container_client.list_blobs(name_starts_with=f"{source_prefix}/"):
-        name = blob.name  # e.g. "raw_data/subdir/file.xlsx"
+        name = blob.name
         ext = os.path.splitext(name)[1].lower()
         if ext not in SUPPORTED_EXTENSIONS:
             continue
 
-        # Relative path: strip source prefix
-        relative_path = name[len(source_prefix) + 1:]  # "subdir/file.xlsx"
+        relative_path = name[len(source_prefix) + 1:]
         file_name = os.path.basename(name)
 
         results.append(BlobInfo(
@@ -305,22 +284,12 @@ def generic_unpivot(
     group: str,
     columns: Optional[List[str]] = None,
 ) -> pa.Table:
-    """Wide -> long melt using Polars .unpivot().
-
-    Row index (sample_offset) is the identifier.
-    All columns become channels. Numeric -> value, non-numeric -> value_str.
-
-    NOTE: df columns are named by row1 (channel = original identifier),
-    NOT by row2 (channel_name). This ensures timeseries.channel matches
-    channel.channel for joins.
-    """
+    """Wide -> long melt using Polars .unpivot()."""
     if columns is None:
         columns = df.columns
 
-    # Add row index
     df_indexed = df.select(columns).with_row_index("sample_offset")
 
-    # Native melt — variable_name becomes "channel" (the original col identifier)
     long_df = df_indexed.unpivot(
         index=["sample_offset"],
         on=columns,
@@ -328,7 +297,6 @@ def generic_unpivot(
         value_name="raw_value",
     )
 
-    # Split numeric vs string
     long_df = long_df.with_columns(
         pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
         pl.when(
@@ -340,13 +308,11 @@ def generic_unpivot(
         .alias("value_str"),
     )
 
-    # Add provenance
     long_df = long_df.with_columns(
         pl.lit(file_uuid).alias("uuid"),
         pl.lit(group).alias("group"),
     )
 
-    # Select in schema order
     result = long_df.select(
         ["uuid", "group", "sample_offset", "channel", "value", "value_str"]
     )
@@ -377,13 +343,7 @@ def build_channel(
     file_uuid: str, group: str,
     channels: List[str], channel_names: List[str], units: List[str],
 ) -> pa.Table:
-    """Build channel catalog from the 3-row header scan.
-
-    Args:
-        channels: row 1 values (original identifier) — used as join key
-        channel_names: row 2 values (display name)
-        units: row 3 values (measurement unit, if detected)
-    """
+    """Build channel catalog from the 3-row header scan."""
     n = len(channel_names)
     return pa.table({
         "uuid": [file_uuid] * n,
@@ -412,10 +372,7 @@ def build_statistics(
 # =============================================================================
 
 class ParquetWriter:
-    """Writes Arrow tables as Parquet to ADLS via Azure SDK.
-
-    Zero JVM overhead. PyArrow serializes to bytes, SDK uploads parallel chunks.
-    """
+    """Writes Arrow tables as Parquet to ADLS via Azure SDK."""
 
     def __init__(self, storage_account: str, container: str, output_prefix: str,
                  compression="zstd", compression_level=3):
@@ -446,7 +403,6 @@ class ParquetWriter:
             filename = f"{base_filename}{group_suffix}_{table_type}.parquet"
             blob_name = f"{self.output_prefix}/{table_type}/{filename}"
 
-            # PyArrow → bytes buffer → SDK upload (parallel PUT)
             buf = io.BytesIO()
             pq.write_table(table, buf,
                            compression=self.compression,
@@ -463,7 +419,7 @@ class ParquetWriter:
 
 
 # =============================================================================
-# INCREMENTAL TRACKER (watermark + Azure SDK listing)
+# INCREMENTAL TRACKER (watermark + Azure SDK listing + retry tracking)
 # =============================================================================
 
 class IncrementalTracker:
@@ -474,10 +430,19 @@ class IncrementalTracker:
     2. List blobs via Azure SDK, skip older than watermark
     3. Cross-check candidates against tracking table (small set)
 
+    Retry tracking:
+    - retry_count column tracks how many times a FAILED file has been retried
+    - On SUCCESS: retry_count resets to 0
+    - On FAILED: retry_count increments by 1
+    - Driver skips files where retry_count >= MAX_TOTAL_RETRIES (permanently broken)
+
+    Deduplication:
+    - MERGE ON blob_path guarantees exactly-once tracking per file
+    - Even if same file is submitted twice in the same batch, MERGE deduplicates
+
     Bronze integration:
     - Bronze ingest queries this same tracking table (status='SUCCESS')
     - Only ingests Parquet files listed in output_paths of successful conversions
-    - No Auto Loader needed — converter tracking IS the source of truth
     """
 
     def __init__(self, tracking_table: str, spark_session):
@@ -486,14 +451,24 @@ class IncrementalTracker:
         self._ensure_exists()
 
     def _ensure_exists(self):
+        """Create tracking table if not exists. Add retry_count for existing tables."""
         self.spark.sql(f"""
             CREATE TABLE IF NOT EXISTS {self.table} (
                 blob_path STRING, file_name STRING, file_size BIGINT,
                 file_uuid STRING,
                 last_modified TIMESTAMP, status STRING, processed_at TIMESTAMP,
-                output_paths STRING, error_message STRING, duration_seconds DOUBLE
+                output_paths STRING, error_message STRING, duration_seconds DOUBLE,
+                retry_count INT
             ) USING DELTA
         """)
+        # Schema migration: add retry_count to existing tables that lack it
+        try:
+            cols = [f.name for f in self.spark.table(self.table).schema.fields]
+            if "retry_count" not in cols:
+                self.spark.sql(f"ALTER TABLE {self.table} ADD COLUMNS (retry_count INT)")
+                logger.info(f"Added retry_count column to {self.table}")
+        except Exception:
+            pass
 
     def _get_watermark(self) -> Optional[datetime]:
         """Get high watermark: max last_modified of successfully processed files."""
@@ -512,12 +487,10 @@ class IncrementalTracker:
         if watermark:
             logger.info(f"Watermark: {watermark.isoformat()} (skipping older blobs)")
         else:
-            logger.info("No watermark (first run) — processing all blobs")
+            logger.info("No watermark (first run) - processing all blobs")
 
-        # List blobs via Azure SDK (parallel HTTP pagination)
         all_blobs = list_source_blobs(storage_account, container, source_prefix)
 
-        # Filter by watermark
         if watermark:
             candidates = [b for b in all_blobs if b.last_modified > watermark]
             skipped = len(all_blobs) - len(candidates)
@@ -529,7 +502,7 @@ class IncrementalTracker:
         if not candidates:
             return []
 
-        # Cross-check candidates against tracking table (avoid re-processing)
+        # Cross-check candidates against tracking table (avoid re-processing SUCCESS files)
         processed = set()
         try:
             paths_sql = ",".join(f"'{c.relative_path}'" for c in candidates)
@@ -547,30 +520,43 @@ class IncrementalTracker:
         return new_blobs
 
     def batch_merge_results(self, results_df):
-        """Batch MERGE tracking results from mapPartitions into Delta table.
+        """Batch MERGE tracking results into Delta table.
 
-        Much more efficient than individual MERGE per file.
+        Retry logic:
+        - SUCCESS: reset retry_count to 0 (file recovered after transient failure)
+        - FAILED: increment retry_count (tracks cumulative failures across runs)
+        - New file: retry_count = 0 for SUCCESS, 1 for FAILED
         """
         results_df.createOrReplaceTempView("_converter_batch_results")
         self.spark.sql(f"""
             MERGE INTO {self.table} t
             USING _converter_batch_results s
             ON t.blob_path = s.blob_path
-            WHEN MATCHED THEN UPDATE SET
+            WHEN MATCHED AND s.status = 'SUCCESS' THEN UPDATE SET
+                status = s.status, processed_at = current_timestamp(),
+                file_size = s.file_size, file_uuid = s.file_uuid,
+                last_modified = s.last_modified,
+                output_paths = s.output_paths,
+                error_message = NULL,
+                duration_seconds = s.duration_seconds,
+                retry_count = 0
+            WHEN MATCHED AND s.status != 'SUCCESS' THEN UPDATE SET
                 status = s.status, processed_at = current_timestamp(),
                 file_size = s.file_size, file_uuid = s.file_uuid,
                 last_modified = s.last_modified,
                 output_paths = s.output_paths,
                 error_message = s.error_message,
-                duration_seconds = s.duration_seconds
+                duration_seconds = s.duration_seconds,
+                retry_count = COALESCE(t.retry_count, 0) + 1
             WHEN NOT MATCHED THEN INSERT (
                 blob_path, file_name, file_size, file_uuid,
                 last_modified, status, processed_at,
-                output_paths, error_message, duration_seconds
+                output_paths, error_message, duration_seconds, retry_count
             ) VALUES (
                 s.blob_path, s.file_name, s.file_size, s.file_uuid,
                 s.last_modified, s.status, current_timestamp(),
-                s.output_paths, s.error_message, s.duration_seconds
+                s.output_paths, s.error_message, s.duration_seconds,
+                CASE WHEN s.status = 'SUCCESS' THEN 0 ELSE 1 END
             )
         """)
         self.spark.catalog.dropTempView("_converter_batch_results")

@@ -1,33 +1,39 @@
 """ELY Data Converter — Spark distributed orchestrator.
 
-Architecture: Azure SDK + Spark mapPartitions.
+Architecture: Azure SDK + Spark mapPartitions + ThreadPoolExecutor.
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ DRIVER                                                                  │
 │  1. get_env_variables(spark) → storage_account, container, catalog      │
 │  2. IncrementalTracker.get_new_files() → List[BlobInfo] (SDK listing)   │
-│  3. spark.createDataFrame(blobs).repartition(N)                         │
+│  3. spark.createDataFrame(blobs).repartition(num_partitions)            │
 │  4. .rdd.mapPartitions(_process_partition) → results                    │
 │  5. tracker.batch_merge_results(results_df)                             │
 └─────────────────────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ WORKER (per partition)                                                   │
-│  1. os.environ["AZURE_*"] → BlobServiceClient (per-worker instance)     │
-│  2. download_blob().readall() → bytes (parallel HTTP chunks)            │
-│  3. Polars + calamine parse (Rust, releases GIL)                        │
-│  4. PyArrow → Parquet bytes in memory                                   │
-│  5. upload_blob(buf, max_concurrency=4) → ADLS                          │
-│  6. yield Row(blob_path, status, output_paths, ...)                     │
+│ WORKER (per partition) — processes MULTIPLE files via ThreadPool        │
+│  1. os.environ["AZURE_*"] → BlobServiceClient (per-partition instance)  │
+│  2. ThreadPoolExecutor(max_workers=THREADS_PER_PARTITION)               │
+│  3. Each thread: download → Polars parse → PyArrow → upload             │
+│  4. Retry with backoff for transient errors (network, throttle)         │
+│  5. Collect results → yield Row(...)                                    │
 └─────────────────────────────────────────────────────────────────────────┘
 
-Scalability:
-- num_workers=0 (dev): all partitions on driver, local[*] parallelism
-- num_workers=N (prod): Spark distributes partitions across N executors
-- Linear scaling: 4 workers × 16 cores = process 64 files concurrently
+Reliability:
+  - Transient errors (timeout, throttle, connection reset): retry up to MAX_RETRIES
+    with exponential backoff (1s, 2s, 4s)
+  - Permanent errors (parse failure, corrupt file): fail immediately, no retry
+  - Retry cap in tracking table: files that failed MAX_RETRIES across runs
+    are skipped (avoids infinite retry of corrupt files)
 
-Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
-Workers read os.environ["AZURE_*"] — set at cluster init, available on ALL nodes.
-ADLS config (storage_account, container, output_prefix) passed via DataFrame columns
-to ensure propagation to remote executors.
+Deduplication:
+  - Spark repartition guarantees each Row in exactly ONE partition (hash-based)
+  - xlsx/csv tasks filter by extension → no overlap
+  - Tracking table MERGE on blob_path → idempotent updates
+
+Scalability (two-level parallelism):
+  Level 1 (inter-node): Spark distributes partitions across workers
+  Level 2 (intra-node): ThreadPoolExecutor within each partition
+  spark.task.cpus=4 aligns scheduler slots with actual thread usage
 """
 import os
 import sys
@@ -36,7 +42,8 @@ import time
 import argparse
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Iterator, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pyspark.sql import SparkSession, Row
 from pyspark.sql.types import (
@@ -47,6 +54,35 @@ from pyspark.sql.types import (
 _SRC_DIR = str(Path(__file__).resolve().parent)
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
+
+
+# =============================================================================
+# TUNING CONSTANTS
+# =============================================================================
+
+# Files per Spark partition (batch size per task)
+FILES_PER_PARTITION = 10
+
+# Threads per partition (concurrent files within a single Spark task)
+THREADS_PER_PARTITION = 4
+
+# Retry config for transient errors
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 1.0  # seconds (1s, 2s, 4s)
+
+# Max retry count across runs (skip permanently broken files)
+MAX_TOTAL_RETRIES = 5
+
+# Transient error types (retry these)
+TRANSIENT_ERRORS = (
+    "ConnectionError",
+    "ConnectionResetError",
+    "TimeoutError",
+    "ServiceRequestError",
+    "ServiceResponseError",
+    "HttpResponseError",  # Azure SDK throttling (429)
+    "ClientAuthenticationError",  # token refresh transient
+)
 
 
 # =============================================================================
@@ -67,58 +103,63 @@ RESULT_SCHEMA = StructType([
 
 
 # =============================================================================
-# WORKER FUNCTION (runs inside mapPartitions on executors)
+# RETRY HELPER
 # =============================================================================
 
-def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
-    """Process a partition of blob paths on a Spark worker.
+def _is_transient_error(error: Exception) -> bool:
+    """Check if error is transient (network/throttle) and worth retrying."""
+    error_type = type(error).__name__
+    # Check against known transient error types
+    if error_type in TRANSIENT_ERRORS:
+        return True
+    # Azure SDK wraps errors — check cause chain
+    if hasattr(error, "__cause__") and error.__cause__:
+        cause_type = type(error.__cause__).__name__
+        if cause_type in TRANSIENT_ERRORS:
+            return True
+    # HTTP 429 (throttled) or 5xx (server error) in message
+    error_msg = str(error).lower()
+    if "429" in error_msg or "throttl" in error_msg:
+        return True
+    if any(f"{code}" in error_msg for code in range(500, 504)):
+        return True
+    return False
 
-    Each worker:
-    1. Creates its own BlobServiceClient from env vars (connection pooling)
-    2. Downloads file bytes via SDK (parallel HTTP chunks)
-    3. Parses with Polars (Rust, zero GIL contention)
-    4. Writes Parquet via PyArrow → bytes → SDK upload
 
-    ADLS config (storage_account, container, output_prefix) is passed as
-    columns in each Row — NOT via os.environ (which isn't propagated to
-    remote executors in multi-worker mode).
+# =============================================================================
+# SINGLE FILE PROCESSOR (called by ThreadPoolExecutor, with retry)
+# =============================================================================
 
-    Lazy imports inside worker (addPyFile compatibility + clean isolation).
+def _process_single_file(
+    row,
+    container_client,
+    writer,
+    convert_xlsx,
+    convert_csv,
+    generate_file_uuid,
+    sanitize_name,
+    logger,
+) -> Row:
+    """Process a single file with retry for transient errors.
+
+    Retry policy:
+    - Transient errors (network, throttle): retry up to MAX_RETRIES with backoff
+    - Permanent errors (parse, corrupt): fail immediately
+    - Thread-safe (no shared mutable state)
     """
-    # Lazy imports — only loaded on workers that actually process data
-    from common import (
-        get_blob_service_client, generate_file_uuid, sanitize_name,
-        ParquetWriter, logger,
-    )
-    from xlsx_converter import convert as convert_xlsx
-    from csv_converter import convert as convert_csv
+    t0 = time.time()
+    blob_path = row.blob_path
+    relative_path = row.relative_path
+    file_name = row.file_name
+    file_size = row.file_size
+    last_modified = row.last_modified
+    extension = row.extension
 
-    # Per-partition state (lazy init on first row)
-    sdk_client = None
-    container_client = None
-    writer = None
+    last_error = None
 
-    for row in rows:
-        t0 = time.time()
-        blob_path = row.blob_path        # e.g. "raw_data/subdir/file.xlsx"
-        relative_path = row.relative_path # e.g. "subdir/file.xlsx"
-        file_name = row.file_name
-        file_size = row.file_size
-        last_modified = row.last_modified
-        extension = row.extension
-        # ADLS config carried per-row (propagated to remote workers)
-        storage_account = row.storage_account
-        container = row.container
-        output_prefix = row.output_prefix
-
-        # Lazy init SDK client (once per partition, reused across rows)
-        if sdk_client is None:
-            sdk_client = get_blob_service_client(storage_account)
-            container_client = sdk_client.get_container_client(container)
-            writer = ParquetWriter(storage_account, container, output_prefix)
-
+    for attempt in range(MAX_RETRIES + 1):
         try:
-            # --- DOWNLOAD (Azure SDK — parallel HTTP chunks, zero JVM) ---
+            # --- DOWNLOAD (Azure SDK — parallel HTTP chunks) ---
             blob = container_client.get_blob_client(blob_path)
             file_bytes = blob.download_blob(max_concurrency=4).readall()
 
@@ -133,7 +174,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
             if not results:
                 raise ValueError("No data extracted (empty or unparseable)")
 
-            # --- WRITE (PyArrow → bytes → SDK upload, parallel PUT) ---
+            # --- WRITE (PyArrow → bytes → SDK upload) ---
             file_uuid = generate_file_uuid(relative_path)
             base_filename = sanitize_name(Path(file_name).stem)
             all_output_paths = {}
@@ -143,10 +184,11 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
                 all_output_paths.update(paths)
 
             duration = time.time() - t0
+            retry_info = f", retries={attempt}" if attempt > 0 else ""
             logger.info(f"  OK: {relative_path} ({file_size/1024:.0f}KB, "
-                        f"{len(results)} group(s), {duration:.1f}s)")
+                        f"{len(results)} group(s), {duration:.1f}s{retry_info})")
 
-            yield Row(
+            return Row(
                 blob_path=relative_path,
                 file_name=file_name,
                 file_size=file_size,
@@ -159,19 +201,97 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
             )
 
         except Exception as e:
-            duration = time.time() - t0
-            logger.error(f"  FAIL: {relative_path} — {e}")
-            yield Row(
-                blob_path=relative_path,
-                file_name=file_name,
-                file_size=file_size,
-                file_uuid=None,
-                last_modified=last_modified,
-                status="FAILED",
-                output_paths=None,
-                error_message=str(e)[:500],
-                duration_seconds=round(duration, 2),
-            )
+            last_error = e
+
+            # Check if error is transient and retryable
+            if _is_transient_error(e) and attempt < MAX_RETRIES:
+                backoff = RETRY_BACKOFF_BASE * (2 ** attempt)  # 1s, 2s, 4s
+                logger.warning(f"  RETRY {attempt+1}/{MAX_RETRIES}: {relative_path} "
+                               f"— {type(e).__name__}: {str(e)[:100]} (backoff {backoff}s)")
+                time.sleep(backoff)
+                continue
+            else:
+                # Permanent error or max retries exhausted
+                break
+
+    # All retries exhausted or permanent error
+    duration = time.time() - t0
+    error_prefix = f"[after {MAX_RETRIES} retries] " if _is_transient_error(last_error) else ""
+    logger.error(f"  FAIL: {relative_path} — {error_prefix}{last_error}")
+    return Row(
+        blob_path=relative_path,
+        file_name=file_name,
+        file_size=file_size,
+        file_uuid=None,
+        last_modified=last_modified,
+        status="FAILED",
+        output_paths=None,
+        error_message=f"{error_prefix}{str(last_error)[:500]}",
+        duration_seconds=round(duration, 2),
+    )
+
+
+# =============================================================================
+# WORKER FUNCTION (runs inside mapPartitions on executors)
+# =============================================================================
+
+def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
+    """Process a partition of files on a Spark worker.
+
+    Uses ThreadPoolExecutor to process multiple files concurrently within
+    this partition. Polars releases GIL, so true parallelism is achieved.
+
+    Lazy imports inside worker (addPyFile compatibility + clean isolation).
+    """
+    # Materialize iterator to list (needed for ThreadPoolExecutor)
+    rows_list = list(rows)
+    if not rows_list:
+        return
+
+    # Lazy imports — only loaded on workers that actually process data
+    from common import (
+        get_blob_service_client, generate_file_uuid, sanitize_name,
+        ParquetWriter, logger,
+    )
+    from xlsx_converter import convert as convert_xlsx
+    from csv_converter import convert as convert_csv
+
+    # Get ADLS config from first row (all rows in partition have same config)
+    first_row = rows_list[0]
+    storage_account = first_row.storage_account
+    container = first_row.container
+    output_prefix = first_row.output_prefix
+
+    # Create per-partition SDK client (thread-safe, connection pooled)
+    sdk_client = get_blob_service_client(storage_account)
+    container_client = sdk_client.get_container_client(container)
+
+    # Create per-partition Parquet writer (shares SDK client — single auth)
+    writer = ParquetWriter(storage_account, container, output_prefix)
+
+    logger.info(f"Partition received {len(rows_list)} file(s), "
+                f"processing with {THREADS_PER_PARTITION} threads")
+
+    # Process files in parallel using ThreadPoolExecutor
+    if len(rows_list) == 1:
+        # Single file — no thread overhead
+        yield _process_single_file(
+            rows_list[0], container_client, writer,
+            convert_xlsx, convert_csv, generate_file_uuid, sanitize_name, logger,
+        )
+    else:
+        # Multiple files — use ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=THREADS_PER_PARTITION) as executor:
+            futures = {
+                executor.submit(
+                    _process_single_file,
+                    row, container_client, writer,
+                    convert_xlsx, convert_csv, generate_file_uuid, sanitize_name, logger,
+                ): row
+                for row in rows_list
+            }
+            for future in as_completed(futures):
+                yield future.result()
 
 
 # =============================================================================
@@ -184,6 +304,10 @@ def parse_args():
     parser.add_argument("--env", type=str, default="dev_user")
     parser.add_argument("--extensions", type=str, default=".xlsx,.xls,.csv",
                         help="Comma-separated extensions to process")
+    parser.add_argument("--files_per_partition", type=int, default=FILES_PER_PARTITION,
+                        help="Files per Spark partition (batch size)")
+    parser.add_argument("--threads_per_partition", type=int, default=THREADS_PER_PARTITION,
+                        help="Threads per partition (concurrent files)")
     args, _ = parser.parse_known_args()
     return args
 
@@ -194,6 +318,12 @@ def main():
 
     is_int_test = args.is_integration_test.lower() == "true"
     target_extensions = set(args.extensions.split(","))
+    files_per_partition = args.files_per_partition
+    threads_per_partition = args.threads_per_partition
+
+    # Update global for workers
+    global THREADS_PER_PARTITION
+    THREADS_PER_PARTITION = threads_per_partition
 
     # Import common utilities (driver-side)
     from common import (
@@ -215,7 +345,7 @@ def main():
         output_prefix = f"{output_prefix}/_int_test"
 
     logger.info(f"{'='*60}")
-    logger.info(f"ELY Converter — Azure SDK + mapPartitions")
+    logger.info(f"ELY Converter — Azure SDK + mapPartitions + ThreadPool")
     logger.info(f"  Environment: {env_vars['environment']}")
     logger.info(f"  Storage: {storage_account}/{container}")
     logger.info(f"  Source prefix: {source_prefix}")
@@ -223,6 +353,10 @@ def main():
     logger.info(f"  Tracking table: {tracking_table}")
     logger.info(f"  Extensions: {target_extensions}")
     logger.info(f"  Integration test: {is_int_test}")
+    logger.info(f"  Files/partition: {files_per_partition}")
+    logger.info(f"  Threads/partition: {threads_per_partition}")
+    logger.info(f"  Max retries (transient): {MAX_RETRIES}")
+    logger.info(f"  Max total retries (across runs): {MAX_TOTAL_RETRIES}")
     logger.info(f"{'='*60}")
 
     # --- 2. Incremental file discovery (SDK listing + watermark) ---
@@ -231,16 +365,39 @@ def main():
 
     # Filter by target extensions
     new_blobs = [b for b in new_blobs if b.extension in target_extensions]
-    logger.info(f"Files to process (after extension filter): {len(new_blobs)}")
+
+    # Skip files that have exceeded max total retries (permanently broken)
+    if new_blobs:
+        try:
+            paths_sql = ",".join(f"'{b.relative_path}'" for b in new_blobs)
+            exhausted = spark.sql(
+                f"SELECT blob_path FROM {tracking_table} "
+                f"WHERE status = 'FAILED' AND retry_count >= {MAX_TOTAL_RETRIES} "
+                f"AND blob_path IN ({paths_sql})"
+            ).collect()
+            exhausted_paths = {r.blob_path for r in exhausted}
+            if exhausted_paths:
+                logger.warning(f"Skipping {len(exhausted_paths)} file(s) that exceeded "
+                               f"max retries ({MAX_TOTAL_RETRIES}):")
+                for p in exhausted_paths:
+                    logger.warning(f"  SKIP: {p}")
+                new_blobs = [b for b in new_blobs if b.relative_path not in exhausted_paths]
+        except Exception:
+            # retry_count column might not exist yet (first run) — proceed anyway
+            pass
+
+    logger.info(f"Files to process (after extension + retry filter): {len(new_blobs)}")
 
     if not new_blobs:
         logger.info("Nothing to process. Exiting.")
         return
 
     # --- 3. Distribute to workers via Spark ---
-    # ADLS config is passed as columns in the DataFrame (NOT via os.environ).
-    # os.environ on driver is NOT propagated to remote executors in multi-worker.
-    # AZURE_* creds are set via spark_env_vars at cluster init → available everywhere.
+    num_partitions = max(1, (len(new_blobs) + files_per_partition - 1) // files_per_partition)
+    logger.info(f"Partitions: {num_partitions} (for {len(new_blobs)} files, "
+                f"{files_per_partition} files/partition)")
+
+    # Build input DataFrame with ADLS config carried per-row
     file_rows = [
         Row(
             blob_path=b.blob_path,
@@ -249,17 +406,12 @@ def main():
             file_size=b.file_size,
             last_modified=b.last_modified,
             extension=b.extension,
-            # ADLS config carried per-row for worker access
             storage_account=storage_account,
             container=container,
             output_prefix=output_prefix,
         )
         for b in new_blobs
     ]
-
-    # Determine partition count (scale with cluster size)
-    num_partitions = min(len(new_blobs), spark.sparkContext.defaultParallelism)
-    logger.info(f"Partitions: {num_partitions} (for {len(new_blobs)} files)")
 
     # Distribute source modules for worker imports
     src_dir = Path(__file__).resolve().parent
