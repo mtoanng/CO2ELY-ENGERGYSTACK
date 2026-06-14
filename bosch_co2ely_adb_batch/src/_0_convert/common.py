@@ -79,7 +79,15 @@ CONVERTER_CONFIG = {
 
 
 def get_env_variables(spark) -> dict:
-    """Retrieve environment config based on workspace URL (same as TBP)."""
+    """Retrieve environment config based on workspace URL (same as TBP).
+
+    Args:
+        spark: Active SparkSession instance.
+
+    Returns:
+        dict with keys: environment, storage_account, container, unity_catalog.
+        Falls back to dev defaults if workspace URL is unrecognized.
+    """
     try:
         workspace_url = spark.conf.get("spark.databricks.workspaceUrl")
     except Exception:
@@ -96,7 +104,16 @@ def get_env_variables(spark) -> dict:
 
 
 def get_adls_config(env_vars: dict) -> dict:
-    """Resolve ADLS blob paths for the current environment."""
+    """Resolve ADLS blob paths for the current environment.
+
+    Args:
+        env_vars: Dict from get_env_variables() with storage_account,
+            container, and unity_catalog.
+
+    Returns:
+        dict with keys: storage_account, container, source_prefix,
+        output_prefix, tracking_table (fully qualified Delta table name).
+    """
     catalog = env_vars["unity_catalog"]
     schema = CONVERTER_CONFIG["schema"]
     return {
@@ -111,9 +128,14 @@ def get_adls_config(env_vars: dict) -> dict:
 def build_abfss_path(storage_account: str, container: str, blob_path: str) -> str:
     """Construct full abfss:// URI from components.
 
-    Example:
-        build_abfss_path("stpsbdodxdev2datalake", "co2elyd-data", "raw_data/sub/file.xlsx")
-        → "abfss://co2elyd-data@stpsbdodxdev2datalake.dfs.core.windows.net/raw_data/sub/file.xlsx"
+    Args:
+        storage_account: ADLS Gen2 storage account name (e.g. "stpsbdodxdev2datalake").
+        container: Blob container name (e.g. "co2elyd-data").
+        blob_path: Relative blob path within the container (e.g. "raw_data/sub/file.xlsx").
+
+    Returns:
+        Full abfss:// URI string for use with Spark or External Locations.
+        Example: "abfss://co2elyd-data@stpsbdodxdev2datalake.dfs.core.windows.net/raw_data/sub/file.xlsx"
     """
     return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{blob_path}"
 
@@ -127,6 +149,17 @@ def get_blob_service_client(storage_account: str = None):
 
     Credentials come from spark_env_vars (resolved from {{secrets/...}}).
     Safe to call on driver or inside mapPartitions workers.
+
+    Args:
+        storage_account: ADLS Gen2 storage account name. If None, reads from
+            os.environ (not recommended).
+
+    Returns:
+        azure.storage.blob.BlobServiceClient authenticated via ClientSecretCredential.
+
+    Raises:
+        KeyError: If AZURE_TENANT_ID, AZURE_CLIENT_ID, or AZURE_CLIENT_SECRET
+            are not set in os.environ.
     """
     from azure.identity import ClientSecretCredential
     from azure.storage.blob import BlobServiceClient
@@ -148,7 +181,17 @@ _CO2ELY_NAMESPACE = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
 
 def generate_file_uuid(relative_path: str) -> str:
-    """Generate deterministic UUID from relative blob path."""
+    """Generate deterministic UUID from relative blob path.
+
+    Uses UUID5 with a fixed namespace so the same file always produces the
+    same UUID regardless of environment (dev/qa/prod).
+
+    Args:
+        relative_path: Environment-independent blob path (e.g. "test/PoC Stack II/file.xlsx").
+
+    Returns:
+        UUID string (e.g. "a1b2c3d4-...") deterministically derived from the path.
+    """
     return str(uuid.uuid5(_CO2ELY_NAMESPACE, relative_path))
 
 
@@ -222,14 +265,31 @@ class BlobInfo:
 # =============================================================================
 
 def sanitize_name(name: str) -> str:
-    """Clean string for safe filesystem/blob name usage."""
+    """Clean string for safe filesystem/blob name usage.
+
+    Args:
+        name: Raw string (e.g. file stem, sheet name) potentially containing
+            unsafe characters.
+
+    Returns:
+        Cleaned string with special chars replaced by '_', spaces replaced,
+        consecutive underscores collapsed, and leading/trailing '_' stripped.
+    """
     name = re.sub(r'[<>:"/\\|?*]', "_", name)
     name = name.replace(" ", "_")
     return re.sub(r"_+", "_", name).strip("_")
 
 
 def _is_unit_cell(value: str) -> bool:
-    """Check if a cell value looks like a channel unit."""
+    """Check if a cell value looks like a channel unit.
+
+    Args:
+        value: Cell string value from row 3 of the header.
+
+    Returns:
+        True if value is a single character or contains special chars
+        (indicating a unit like 'V', 'mA', '°C', 'µm').
+    """
     if not value or not value.strip():
         return False
     v = value.strip()
@@ -241,7 +301,15 @@ def _is_unit_cell(value: str) -> bool:
 
 
 def detect_units_row(row_values: List[str]) -> bool:
-    """Check if a row is a units row (majority of non-empty cells look like units)."""
+    """Check if a row is a units row (majority of non-empty cells look like units).
+
+    Args:
+        row_values: List of string values from row 3 of the header.
+
+    Returns:
+        True if > 50% of non-empty cells pass _is_unit_cell() check,
+        indicating this row contains measurement units rather than data.
+    """
     non_empty = [v for v in row_values if v and v.strip()]
     if not non_empty:
         return False
@@ -257,7 +325,20 @@ SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 
 def list_source_blobs(storage_account: str, container: str, source_prefix: str) -> List[BlobInfo]:
-    """List source blobs via Azure SDK (ContainerClient.list_blobs)."""
+    """List source blobs via Azure SDK (ContainerClient.list_blobs).
+
+    Scans all blobs under source_prefix/ and returns metadata for supported
+    file types (.csv, .xlsx, .xls).
+
+    Args:
+        storage_account: ADLS Gen2 storage account name.
+        container: Blob container name.
+        source_prefix: Blob path prefix to scan (e.g. "raw_data").
+
+    Returns:
+        List[BlobInfo] with metadata for each discovered blob (path, size,
+        last_modified, extension). Only includes supported extensions.
+    """
     client = get_blob_service_client(storage_account)
     container_client = client.get_container_client(container)
 
@@ -294,7 +375,23 @@ def generic_unpivot(
     group: str,
     columns: Optional[List[str]] = None,
 ) -> pa.Table:
-    """Wide -> long melt using Polars .unpivot()."""
+    """Wide -> long melt using Polars .unpivot().
+
+    Converts a wide DataFrame (one column per channel) into a long-format
+    PyArrow table with columns: uuid, group, sample_offset, channel, value, value_str.
+
+    Args:
+        df: Polars DataFrame with data rows. Columns should be named by
+            channel identifiers (row 1 headers).
+        file_uuid: Deterministic UUID for this file (join key).
+        group: Group identifier (sheet name for xlsx, "data" for csv).
+        columns: List of column names to unpivot. If None, uses all columns.
+
+    Returns:
+        PyArrow Table cast to SCHEMAS["timeseries"] with columns:
+        uuid, group, sample_offset, channel, value (Float64), value_str (String).
+        Numeric values go in 'value', non-numeric strings go in 'value_str'.
+    """
     if columns is None:
         columns = df.columns
 
@@ -338,6 +435,18 @@ def build_filemeta(
     file_path: str, file_uuid: str, file_size: int,
     last_modified: Optional[datetime],
 ) -> pa.Table:
+    """Build filemeta PyArrow table (1 row per file).
+
+    Args:
+        file_path: Full abfss:// URI or relative path for traceability.
+        file_uuid: Deterministic UUID for this file.
+        file_size: File size in bytes.
+        last_modified: Blob last modification timestamp.
+
+    Returns:
+        PyArrow Table with schema: uuid, file_path, raw_file_name, file_size,
+        last_modified, ingested_timestamp.
+    """
     now = datetime.now(tz=timezone.utc)
     return pa.table({
         "uuid": [file_uuid],
@@ -353,7 +462,19 @@ def build_channel(
     file_uuid: str, group: str,
     channels: List[str], channel_names: List[str], units: List[str],
 ) -> pa.Table:
-    """Build channel catalog from the 3-row header scan."""
+    """Build channel catalog PyArrow table from the 3-row header scan.
+
+    Args:
+        file_uuid: Deterministic UUID for this file (join key).
+        group: Group identifier (sheet name or "data").
+        channels: List of channel identifiers (row 1 values).
+        channel_names: List of display names (row 2 values).
+        units: List of unit strings (row 3 values, empty string if no unit).
+
+    Returns:
+        PyArrow Table with schema: uuid, group, channel, channel_name, unit,
+        column_index. One row per channel.
+    """
     n = len(channel_names)
     return pa.table({
         "uuid": [file_uuid] * n,
@@ -368,6 +489,18 @@ def build_channel(
 def build_statistics(
     file_uuid: str, group: str, n_channels: int, n_rows: int,
 ) -> pa.Table:
+    """Build statistics summary PyArrow table (1 row per group).
+
+    Args:
+        file_uuid: Deterministic UUID for this file (join key).
+        group: Group identifier (sheet name or "data").
+        n_channels: Number of data channels (columns).
+        n_rows: Number of data rows (excluding header rows).
+
+    Returns:
+        PyArrow Table with schema: uuid, group, n_channels, n_rows,
+        n_timeseries_rows (= n_rows * n_channels).
+    """
     return pa.table({
         "uuid": [file_uuid],
         "group": [group],
@@ -382,10 +515,23 @@ def build_statistics(
 # =============================================================================
 
 class ParquetWriter:
-    """Writes Arrow tables as Parquet to ADLS via Azure SDK."""
+    """Writes Arrow tables as Parquet to ADLS via Azure SDK.
+
+    Creates one Parquet file per table_type per group (e.g. timeseries/filename_sheetname.parquet).
+    Uses Zstd compression for optimal size/speed trade-off.
+    """
 
     def __init__(self, storage_account: str, container: str, output_prefix: str,
                  compression="zstd", compression_level=3):
+        """Initialize ParquetWriter with ADLS coordinates.
+
+        Args:
+            storage_account: ADLS Gen2 storage account name.
+            container: Blob container name.
+            output_prefix: Base blob path for output (e.g. "parquet_raw").
+            compression: Parquet compression codec (default: "zstd").
+            compression_level: Compression level (default: 3).
+        """
         self.storage_account = storage_account
         self.container = container
         self.output_prefix = output_prefix
@@ -401,7 +547,17 @@ class ParquetWriter:
         return self._client
 
     def write_result(self, result: ConversionResult, base_filename: str) -> Dict[str, str]:
-        """Write 4 Parquet tables to ADLS. Returns {table_type: blob_path}."""
+        """Write 4 Parquet tables to ADLS for a single conversion result.
+
+        Args:
+            result: ConversionResult containing PyArrow tables for each table_type.
+            base_filename: Sanitized base name for output files (derived from source file stem).
+
+        Returns:
+            Dict mapping table_type to relative blob path (e.g.
+            {"timeseries": "timeseries/filename_sheetname_timeseries.parquet"}).
+            Only includes table_types with > 0 rows (except filemeta/statistics which are always written).
+        """
         output_paths = {}
         group_suffix = f"_{sanitize_name(result.group_name)}" if result.group_name else ""
         container_client = self.client.get_container_client(self.container)
@@ -456,12 +612,23 @@ class IncrementalTracker:
     """
 
     def __init__(self, tracking_table: str, spark_session):
+        """Initialize tracker and ensure table schema exists.
+
+        Args:
+            tracking_table: Fully qualified Delta table name
+                (e.g. "co2elyd_dev.converter.file_tracking").
+            spark_session: Active SparkSession for SQL operations.
+        """
         self.table = tracking_table
         self.spark = spark_session
         self._ensure_exists()
 
     def _ensure_exists(self):
-        """Create tracking table if not exists. Add retry_count for existing tables."""
+        """Create tracking table if not exists. Add retry_count for existing tables.
+
+        Returns:
+            None. Side effect: Delta table created/migrated in Unity Catalog.
+        """
         self.spark.sql(f"""
             CREATE TABLE IF NOT EXISTS {self.table} (
                 blob_path STRING, file_name STRING, file_size BIGINT,
@@ -481,7 +648,12 @@ class IncrementalTracker:
             pass
 
     def _get_watermark(self) -> Optional[datetime]:
-        """Get high watermark: max last_modified of successfully processed files."""
+        """Get high watermark: max last_modified of successfully processed files.
+
+        Returns:
+            datetime of the most recent successfully processed file's last_modified,
+            or None if no SUCCESS records exist (first run).
+        """
         try:
             row = self.spark.sql(
                 f"SELECT MAX(last_modified) AS wm FROM {self.table} WHERE status='SUCCESS'"
@@ -492,7 +664,23 @@ class IncrementalTracker:
 
     def get_new_files(self, storage_account: str, container: str,
                       source_prefix: str) -> List[BlobInfo]:
-        """Discover new/modified blobs using SDK listing + watermark."""
+        """Discover new/modified blobs using SDK listing + watermark.
+
+        Strategy:
+        1. Get watermark (max last_modified of SUCCESS)
+        2. List all blobs via Azure SDK
+        3. Filter: skip blobs older than watermark
+        4. Cross-check: skip blobs already SUCCESS in tracking table
+
+        Args:
+            storage_account: ADLS Gen2 storage account name.
+            container: Blob container name.
+            source_prefix: Blob path prefix to scan (e.g. "raw_data").
+
+        Returns:
+            List[BlobInfo] of blobs that need processing (new or modified
+            since last successful run).
+        """
         watermark = self._get_watermark()
         if watermark:
             logger.info(f"Watermark: {watermark.isoformat()} (skipping older blobs)")
@@ -532,10 +720,19 @@ class IncrementalTracker:
     def batch_merge_results(self, results_df):
         """Batch MERGE tracking results into Delta table.
 
-        Retry logic:
+        Performs atomic upsert: updates existing records or inserts new ones.
+        Handles retry_count logic:
         - SUCCESS: reset retry_count to 0 (file recovered after transient failure)
         - FAILED: increment retry_count (tracks cumulative failures across runs)
         - New file: retry_count = 0 for SUCCESS, 1 for FAILED
+
+        Args:
+            results_df: Spark DataFrame with RESULT_SCHEMA columns (blob_path,
+                file_name, file_size, file_uuid, last_modified, status,
+                output_paths, error_message, duration_seconds).
+
+        Returns:
+            None. Side effect: tracking table updated via MERGE INTO.
         """
         results_df.createOrReplaceTempView("_converter_batch_results")
         self.spark.sql(f"""

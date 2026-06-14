@@ -107,7 +107,18 @@ RESULT_SCHEMA = StructType([
 # =============================================================================
 
 def _is_transient_error(error: Exception) -> bool:
-    """Check if error is transient (network/throttle) and worth retrying."""
+    """Check if error is transient (network/throttle) and worth retrying.
+
+    Inspects error type name, cause chain, and message content for known
+    transient patterns (Azure SDK errors, HTTP 429/5xx).
+
+    Args:
+        error: The exception to classify.
+
+    Returns:
+        True if error is transient and should be retried with backoff.
+        False if error is permanent (parse failure, corrupt file, etc.).
+    """
     error_type = type(error).__name__
     # Check against known transient error types
     if error_type in TRANSIENT_ERRORS:
@@ -140,12 +151,28 @@ def _process_single_file(
     sanitize_name,
     logger,
 ) -> Row:
-    """Process a single file with retry for transient errors.
+    """Process a single file: download → parse → write Parquet → return result Row.
 
-    Retry policy:
-    - Transient errors (network, throttle): retry up to MAX_RETRIES with backoff
-    - Permanent errors (parse, corrupt): fail immediately
-    - Thread-safe (no shared mutable state)
+    Implements retry with exponential backoff for transient errors.
+    Thread-safe (no shared mutable state). Called by ThreadPoolExecutor
+    inside _process_partition.
+
+    Args:
+        row: Spark Row with fields: blob_path, relative_path, file_name,
+            file_size, last_modified, extension, storage_account, container,
+            output_prefix.
+        container_client: Azure ContainerClient (shared, thread-safe).
+        writer: ParquetWriter instance for uploading output Parquet files.
+        convert_xlsx: xlsx_converter.convert function reference.
+        convert_csv: csv_converter.convert function reference.
+        generate_file_uuid: common.generate_file_uuid function reference.
+        sanitize_name: common.sanitize_name function reference.
+        logger: Logger instance for structured output.
+
+    Returns:
+        Spark Row with RESULT_SCHEMA fields: blob_path, file_name, file_size,
+        file_uuid, last_modified, status ("SUCCESS" or "FAILED"),
+        output_paths (JSON), error_message, duration_seconds.
     """
     t0 = time.time()
     blob_path = row.blob_path
@@ -241,10 +268,21 @@ def _process_single_file(
 def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
     """Process a partition of files on a Spark worker.
 
-    Uses ThreadPoolExecutor to process multiple files concurrently within
-    this partition. Polars releases GIL, so true parallelism is achieved.
+    Creates a single SDK client and ParquetWriter per partition, then processes
+    files concurrently via ThreadPoolExecutor. Polars releases GIL, so true
+    parallelism is achieved across threads.
 
     Lazy imports inside worker (addPyFile compatibility + clean isolation).
+
+    Args:
+        rows: Iterator of Spark Rows from one partition. Each Row contains
+            file metadata + ADLS config (blob_path, relative_path, file_name,
+            file_size, last_modified, extension, storage_account, container,
+            output_prefix).
+
+    Returns:
+        Iterator of result Rows with RESULT_SCHEMA fields (blob_path, status,
+        output_paths, error_message, duration_seconds, etc.).
     """
     # Materialize iterator to list (needed for ThreadPoolExecutor)
     rows_list = list(rows)
@@ -302,6 +340,16 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
 # =============================================================================
 
 def parse_args():
+    """Parse CLI arguments passed by Databricks spark_python_task.
+
+    Args:
+        None (reads from sys.argv).
+
+    Returns:
+        argparse.Namespace with fields: is_integration_test (str),
+        env (str), extensions (str), files_per_partition (int),
+        threads_per_partition (int).
+    """
     parser = argparse.ArgumentParser(description="ELY Converter (Azure SDK + mapPartitions)")
     parser.add_argument("--is_integration_test", type=str, default="false")
     parser.add_argument("--env", type=str, default="dev_user")
@@ -316,6 +364,18 @@ def parse_args():
 
 
 def main():
+    """Driver entry point: discover files, distribute to workers, merge results.
+
+    Orchestrates the full conversion pipeline:
+    1. Auto-detect environment from workspace URL
+    2. Discover new/modified blobs via Azure SDK + watermark
+    3. Filter by extension and skip exhausted retries
+    4. Distribute files to Spark workers via mapPartitions
+    5. Collect results and MERGE into tracking table
+
+    Returns:
+        None. Side effects: Parquet files written to ADLS, tracking table updated.
+    """
     args = parse_args()
     spark = SparkSession.builder.getOrCreate()
 

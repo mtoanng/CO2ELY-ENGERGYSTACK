@@ -36,7 +36,27 @@ def _process_sheet(
     last_modified: Optional[datetime],
     abfss_file_path: Optional[str] = None,
 ) -> Optional[ConversionResult]:
-    """Process a single sheet. Thread-safe (no shared mutable state)."""
+    """Process a single Excel sheet into 4 Parquet tables. Thread-safe (no shared mutable state).
+
+    Applies the 3-row header logic (channel, channel_name, unit detection),
+    reads data rows, renames columns to row 1 identifiers, and produces
+    wide-to-long melt for timeseries output.
+
+    Args:
+        file_bytes: Raw Excel file content (shared across threads, immutable).
+        relative_path: Env-independent path for UUID generation.
+        file_uuid: Pre-computed deterministic UUID for this file.
+        file_size: File size in bytes (stored in filemeta).
+        sheet_name: Name of the sheet to process.
+        last_modified: Blob modification timestamp.
+        abfss_file_path: Full abfss:// URI for filemeta.file_path.
+            Falls back to relative_path if None.
+
+    Returns:
+        ConversionResult with 4 PyArrow tables (filemeta, channel, timeseries,
+        statistics) for this sheet. Returns None if sheet is empty, has < 2 rows,
+        or fails to parse.
+    """
     try:
         header_df = pl.read_excel(
             io.BytesIO(file_bytes), engine="calamine",
@@ -119,19 +139,24 @@ def convert(
     last_modified: Optional[datetime] = None,
     abfss_file_path: Optional[str] = None,
 ) -> List[ConversionResult]:
-    """Convert XLSX bytes to 4 Parquet tables per sheet.
+    """Convert XLSX/XLS bytes to 4 Parquet tables per sheet.
+
+    Discovers sheet names via fastexcel, then processes each sheet in parallel
+    (multi-sheet) or sequentially (single-sheet) using the 3-row header logic.
+    Each sheet produces an independent ConversionResult.
 
     Args:
-        file_bytes: Raw file content (downloaded by Azure SDK in worker).
-        relative_path: Env-independent path for UUID generation.
-        file_size: File size in bytes.
-        last_modified: Blob modification timestamp.
+        file_bytes: Raw Excel file content (downloaded by Azure SDK in worker).
+        relative_path: Env-independent path for UUID generation and tracking.
+        file_size: File size in bytes (stored in filemeta).
+        last_modified: Blob modification timestamp (stored in filemeta).
         abfss_file_path: Full abfss:// URI stored in filemeta.file_path.
+            Falls back to relative_path if None.
 
-    Polars + calamine parses from BytesIO (Rust, releases GIL).
-    Sheets are processed in parallel threads:
-    - Each sheet reads from the same file_bytes (immutable, shared safely)
-    - Produces independent ConversionResult (no shared state)
+    Returns:
+        List[ConversionResult]: One ConversionResult per non-empty sheet, each
+        containing 4 PyArrow tables (filemeta, channel, timeseries, statistics).
+        Returns empty list if all sheets are empty or fail to parse.
     """
     import fastexcel
 

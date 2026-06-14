@@ -31,16 +31,24 @@ def convert(
     last_modified: Optional[datetime] = None,
     abfss_file_path: Optional[str] = None,
 ) -> List[ConversionResult]:
-    """Convert CSV bytes to 4 Parquet tables.
+    """Convert CSV bytes to 4 Parquet tables (filemeta, channel, timeseries, statistics).
+
+    Parses the 3-row header structure to extract channel identifiers, display names,
+    and optional units. Then reads data rows, renames columns to row 1 values, and
+    produces a wide-to-long melt for timeseries output.
 
     Args:
         file_bytes: Raw file content (downloaded by Azure SDK in worker).
-        relative_path: Env-independent path for UUID generation.
-        file_size: File size in bytes.
-        last_modified: Blob modification timestamp.
+        relative_path: Env-independent path for UUID generation and tracking.
+        file_size: File size in bytes (stored in filemeta).
+        last_modified: Blob modification timestamp (stored in filemeta).
         abfss_file_path: Full abfss:// URI stored in filemeta.file_path.
+            Falls back to relative_path if None.
 
-    Polars reads from BytesIO (Rust I/O). No JVM, no Py4J.
+    Returns:
+        List[ConversionResult]: Single-element list containing a ConversionResult
+            with 4 PyArrow tables (filemeta, channel, timeseries, statistics).
+            Returns empty list if file has < 2 rows or no data after headers.
     """
     # UUID from relative_path (environment-independent, matches tracking table)
     file_uuid = generate_file_uuid(relative_path)
