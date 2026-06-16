@@ -14,7 +14,7 @@ _converter_cluster_base: &converter_cluster_base
   spark_conf:
     spark.master: "local[*]"
     spark.databricks.cluster.profile: singleNode
-    spark.task.cpus: "2"
+    spark.task.cpus: "4"
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
@@ -30,11 +30,12 @@ _converter_cluster_base: &converter_cluster_base
 
 # --- Scaled cluster for production (multi-worker) ---
 # Autoscale: Spark scheduler adds workers as pending tasks grow.
-# spark.task.cpus=2 → 8 slots per E16 worker (16 cores / 2).
-# Each task runs ThreadPoolExecutor(2) → 2 concurrent file parses.
-# Per worker: 8 slots × 2 threads = 16 concurrent files.
-# Benchmark-validated: 16 concurrent on E16 (128GB) uses ~46% RAM, 100% CPU.
-# Partition strategy: 1 file per partition (fill slots first) → max parallelism.
+# spark.task.cpus=4 → 4 slots per E16 worker (16 cores / 4).
+# Each task runs ThreadPoolExecutor(4) → 4 concurrent file parses.
+# Per worker: 4 slots × 4 threads = 16 concurrent files.
+# Benchmark-validated (32 files, D16): 4T×4thr = 151s (fastest).
+# Fewer tasks = better HTTP connection reuse in BlobServiceClient pool.
+# Partition strategy: fill slots first (1 file per partition when possible).
 _converter_cluster_scaled: &converter_cluster_scaled
   policy_id: ${var.scaled_job_cluster_policy_id}
   spark_version: ${var.spark_version}
@@ -44,7 +45,7 @@ _converter_cluster_scaled: &converter_cluster_scaled
     min_workers: 1
     max_workers: 2
   spark_conf:
-    spark.task.cpus: "2"
+    spark.task.cpus: "4"
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
@@ -114,7 +115,7 @@ common_converter_job_settings: &common_converter_job_settings
   # Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
   # I/O: Azure SDK (parallel HTTP download/upload, zero JVM).
   # Distribution: Spark mapPartitions + ThreadPoolExecutor per partition.
-  # Scheduling: spark.task.cpus=2 → 8 slots per E16 worker → 16 concurrent files.
+  # Scheduling: spark.task.cpus=4 → 4 slots per E16 worker → 16 concurrent files.
   tasks: &converter_tasks
     - task_key: tsk_co2_convert_xlsx
       run_if: "ALL_SUCCESS"

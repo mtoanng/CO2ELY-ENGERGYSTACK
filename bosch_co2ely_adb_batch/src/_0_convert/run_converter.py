@@ -67,7 +67,9 @@ from common import build_abfss_path
 # Threads per partition (concurrent files within a single Spark task)
 # Each task processes its files using a ThreadPoolExecutor with this many workers.
 # Polars/calamine release GIL → real parallelism across threads.
-THREADS_PER_PARTITION = 2
+# Benchmark-validated: 4T×4thr (4 tasks, 4 threads each) is optimal.
+# Fewer tasks = better HTTP connection reuse within BlobServiceClient pool.
+THREADS_PER_PARTITION = 4
 
 # Cluster topology (used to calculate optimal partition count)
 # Priority: fill all task slots first → 1 file per partition when possible
@@ -356,16 +358,13 @@ def parse_args():
 
     Returns:
         argparse.Namespace with fields: is_integration_test (str),
-        env (str), extensions (str), files_per_partition (int),
-        threads_per_partition (int).
+        env (str), extensions (str), threads_per_partition (int).
     """
     parser = argparse.ArgumentParser(description="ELY Converter (Azure SDK + mapPartitions)")
     parser.add_argument("--is_integration_test", type=str, default="false")
     parser.add_argument("--env", type=str, default="dev_user")
     parser.add_argument("--extensions", type=str, default=".xlsx,.xls,.csv",
                         help="Comma-separated extensions to process")
-    parser.add_argument("--files_per_partition", type=int, default=FILES_PER_PARTITION,
-                        help="Files per Spark partition (batch size)")
     parser.add_argument("--threads_per_partition", type=int, default=THREADS_PER_PARTITION,
                         help="Threads per partition (concurrent files)")
     args, _ = parser.parse_known_args()
@@ -390,7 +389,6 @@ def main():
 
     is_int_test = args.is_integration_test.lower() == "true"
     target_extensions = set(args.extensions.split(","))
-    files_per_partition = args.files_per_partition
     threads_per_partition = args.threads_per_partition
 
     # Update global for workers
@@ -467,7 +465,7 @@ def main():
     # Strategy: MAXIMIZE parallelism by filling all available task slots.
     # Each file gets its own partition (= own task) when possible.
     # Only batch files into a partition when num_files exceeds total slots.
-    task_cpus = int(spark.conf.get("spark.task.cpus", "2"))
+    task_cpus = int(spark.conf.get("spark.task.cpus", "4"))
     slots_per_worker = CORES_PER_WORKER // task_cpus
     total_slots = slots_per_worker * MAX_WORKERS
     num_partitions = min(len(new_blobs), total_slots)

@@ -33,9 +33,12 @@ from common import (
     CHUNK_ROWS, TIMESERIES_CHUNK_THRESHOLD,
 )
 
-# Cap sheet-level parallelism to prevent thread explosion on multi-sheet files.
-# Benchmark shows ~2 cores/file already includes nested sheet parallelism.
-MAX_SHEET_THREADS = 3
+# Sheet-level parallelism DISABLED when file-level threading is active.
+# With THREADS_PER_PARTITION=4, file-level concurrency already saturates CPU.
+# Nested sheet threads would cause: 4 tasks × 4 files × N sheets = thread explosion.
+# Each sheet still re-decompresses the full xlsx via calamine (~1.5 GB per call).
+# Sequential sheets within a file keeps memory predictable.
+MAX_SHEET_THREADS = 1
 
 
 def _process_sheet(
