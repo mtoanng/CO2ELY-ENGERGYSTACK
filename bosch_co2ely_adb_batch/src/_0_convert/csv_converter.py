@@ -18,9 +18,10 @@ from typing import List, Optional
 from datetime import datetime
 
 from common import (
-    SCHEMAS, ConversionResult, generic_unpivot, generate_file_uuid,
-    build_filemeta, build_channel, build_statistics,
+    SCHEMAS, ConversionResult, generic_unpivot, generic_unpivot_chunked,
+    generate_file_uuid, build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,
+    CHUNK_ROWS, TIMESERIES_CHUNK_THRESHOLD,
 )
 
 
@@ -116,11 +117,30 @@ def convert(
     # file_path: full abfss:// URI if available, else relative_path
     filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, group, row1_channel, row2_channel_name, units)
-    timeseries = generic_unpivot(df, file_uuid, group, columns)
     statistics = build_statistics(file_uuid, group, n_channels, n_rows)
 
-    return [ConversionResult(
-        tables={"filemeta": filemeta, "channel": channel,
-                "timeseries": timeseries, "statistics": statistics},
-        group_name=None, n_rows=n_rows, n_channels=n_channels,
-    )]
+    # Decide: in-memory unpivot (small) vs chunked unpivot (large)
+    total_timeseries_cells = n_rows * n_channels
+
+    if total_timeseries_cells > TIMESERIES_CHUNK_THRESHOLD:
+        # CHUNKED PATH: bounded memory for large CSV files (BytesIO, no disk)
+        ts_rows, ts_buffer = generic_unpivot_chunked(
+            df, file_uuid, group, columns, CHUNK_ROWS
+        )
+        logger.info(f"    Chunked CSV unpivot: {n_rows} rows × {n_channels} cols = "
+                    f"{ts_rows:,} ts rows")
+
+        return [ConversionResult(
+            tables={"filemeta": filemeta, "channel": channel,
+                    "timeseries": None, "statistics": statistics},
+            group_name=None, n_rows=n_rows, n_channels=n_channels,
+            timeseries_buffer=ts_buffer,
+        )]
+    else:
+        # IN-MEMORY PATH: standard unpivot (fast, no disk I/O)
+        timeseries = generic_unpivot(df, file_uuid, group, columns)
+        return [ConversionResult(
+            tables={"filemeta": filemeta, "channel": channel,
+                    "timeseries": timeseries, "statistics": statistics},
+            group_name=None, n_rows=n_rows, n_channels=n_channels,
+        )]

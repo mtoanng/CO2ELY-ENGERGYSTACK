@@ -30,11 +30,12 @@ import io
 import json
 import uuid
 import logging
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import polars as pl
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 logger = logging.getLogger("ely_converter")
@@ -54,19 +55,22 @@ ENVIRONMENT_CONFIG = {
         "environment": "dev",
         "storage_account": "stpsbdodxdev2datalake",
         "container": "co2elyd-data",
-        "unity_catalog": "co2elyd_dev",
+        "unity_catalog": "ps_xplatform_dev",
+        "unity_schema": "co2elyd_dev",
     },
     "adb-7376334951991000.0.azuredatabricks.net": {
         "environment": "qa",
         "storage_account": "stpsbdodxqadatalake",
         "container": "co2elyd-data",
-        "unity_catalog": "co2elyd_qa",
+        "unity_catalog": "ps_xplatform_qa",
+        "unity_schema": "co2elyd_qa",
     },
     "adb-5407587042408609.9.azuredatabricks.net": {
         "environment": "prod",
         "storage_account": "stpsbdodxproddatalake",
         "container": "co2elyd-data",
-        "unity_catalog": "co2elyd_prod",
+        "unity_catalog": "ps_xplatform_prod",
+        "unity_schema": "co2elyd_prod",
     },
 }
 
@@ -103,6 +107,11 @@ def get_env_variables(spark) -> dict:
     return config
 
 
+def get_unity_catalog_path(env_vars: dict) -> str:
+    """Build fully qualified UC path: catalog.schema."""
+    return f"{env_vars['unity_catalog']}.{env_vars['unity_schema']}"
+
+
 def get_adls_config(env_vars: dict) -> dict:
     """Resolve ADLS blob paths for the current environment.
 
@@ -115,7 +124,7 @@ def get_adls_config(env_vars: dict) -> dict:
         output_prefix, tracking_table (fully qualified Delta table name).
     """
     catalog = env_vars["unity_catalog"]
-    schema = CONVERTER_CONFIG["schema"]
+    schema = env_vars["unity_schema"]
     return {
         "storage_account": env_vars["storage_account"],
         "container": env_vars["container"],
@@ -242,11 +251,18 @@ TABLE_TYPES = list(SCHEMAS.keys())
 
 @dataclass
 class ConversionResult:
-    """Output of a converter."""
+    """Output of a converter.
+
+    For small files, tables["timeseries"] is an in-memory PyArrow Table.
+    For large files (chunked processing), tables["timeseries"] may be None
+    and timeseries_buffer holds a BytesIO with Parquet row groups.
+    ParquetWriter handles both cases transparently.
+    """
     tables: Dict[str, pa.Table]
     group_name: Optional[str] = None
     n_rows: int = 0
     n_channels: int = 0
+    timeseries_buffer: Optional[io.BytesIO] = None  # BytesIO with Parquet for chunked output
 
 
 @dataclass
@@ -428,6 +444,100 @@ def generic_unpivot(
 
 
 # =============================================================================
+# CHUNKED UNPIVOT (bounded memory for large sheets)
+# =============================================================================
+
+# Chunk processing constants
+CHUNK_ROWS = 10_000  # rows per chunk during unpivot (controls peak RAM)
+TIMESERIES_CHUNK_THRESHOLD = 50_000  # total timeseries rows (n_rows × n_cols) before chunking kicks in
+
+
+def generic_unpivot_chunked(
+    df: pl.DataFrame,
+    file_uuid: str,
+    group: str,
+    columns: List[str],
+    chunk_rows: int = CHUNK_ROWS,
+) -> tuple:
+    """Chunked wide->long unpivot with bounded memory via BytesIO.
+
+    Instead of materializing the entire long-format table in RAM, processes
+    the data in row-wise chunks and writes each chunk as a Parquet row group
+    into an in-memory BytesIO buffer. No disk I/O — avoids network-attached
+    storage latency on 'as' VMs.
+
+    Peak memory = chunk_rows × n_columns × ~80 bytes + final compressed Parquet
+    buffer (~53 MB per sheet, compressed with Zstd).
+
+    Args:
+        df: Polars DataFrame with data rows (columns named by channel identifiers).
+        file_uuid: Deterministic UUID for this file (join key).
+        group: Group identifier (sheet name for xlsx, "data" for csv).
+        columns: List of column names to unpivot.
+        chunk_rows: Number of source rows per chunk (default: CHUNK_ROWS).
+            Each chunk produces chunk_rows × len(columns) timeseries rows.
+
+    Returns:
+        Tuple of (total_ts_rows: int, buffer: io.BytesIO) where buffer contains
+        the complete Parquet file with multiple row groups.
+    """
+    n_rows = df.height
+    total_ts_rows = 0
+    buf = io.BytesIO()
+    writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+
+    try:
+        for start in range(0, n_rows, chunk_rows):
+            length = min(chunk_rows, n_rows - start)
+            chunk = df.slice(start, length)
+
+            # Add row index with absolute offset (not relative to chunk)
+            chunk_indexed = chunk.select(columns).with_row_index(
+                "sample_offset", offset=start
+            )
+
+            long_chunk = chunk_indexed.unpivot(
+                index=["sample_offset"],
+                on=columns,
+                variable_name="channel",
+                value_name="raw_value",
+            )
+
+            long_chunk = long_chunk.with_columns(
+                pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
+                pl.when(
+                    pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).is_null()
+                    & pl.col("raw_value").is_not_null()
+                )
+                .then(pl.col("raw_value").cast(pl.String))
+                .otherwise(None)
+                .alias("value_str"),
+            )
+
+            long_chunk = long_chunk.with_columns(
+                pl.lit(file_uuid).alias("uuid"),
+                pl.lit(group).alias("group"),
+            )
+
+            result_chunk = long_chunk.select(
+                ["uuid", "group", "sample_offset", "channel", "value", "value_str"]
+            )
+
+            arrow_chunk = result_chunk.to_arrow().cast(SCHEMAS["timeseries"])
+            writer.write_table(arrow_chunk)
+            total_ts_rows += arrow_chunk.num_rows
+
+            # Explicitly free chunk memory before next iteration
+            del chunk, chunk_indexed, long_chunk, result_chunk, arrow_chunk
+
+    finally:
+        writer.close()
+
+    buf.seek(0)
+    return total_ts_rows, buf
+
+
+# =============================================================================
 # TABLE BUILDERS
 # =============================================================================
 
@@ -549,8 +659,14 @@ class ParquetWriter:
     def write_result(self, result: ConversionResult, base_filename: str) -> Dict[str, str]:
         """Write 4 Parquet tables to ADLS for a single conversion result.
 
+        Handles two modes:
+        - In-memory: table is a PyArrow Table in result.tables (small files)
+        - Chunked: timeseries is in a BytesIO buffer (result.timeseries_buffer)
+          and result.tables["timeseries"] is None. Buffer uploaded directly.
+
         Args:
             result: ConversionResult containing PyArrow tables for each table_type.
+                If result.timeseries_buffer is set, timeseries is uploaded from buffer.
             base_filename: Sanitized base name for output files (derived from source file stem).
 
         Returns:
@@ -563,11 +679,27 @@ class ParquetWriter:
         container_client = self.client.get_container_client(self.container)
 
         for table_type, table in result.tables.items():
-            if table.num_rows == 0 and table_type not in ("filemeta", "statistics"):
-                continue
-
             filename = f"{base_filename}{group_suffix}_{table_type}.parquet"
             blob_name = f"{self.output_prefix}/{table_type}/{filename}"
+
+            # Chunked timeseries: upload directly from BytesIO buffer
+            if table_type == "timeseries" and result.timeseries_buffer:
+                blob_client = container_client.get_blob_client(blob_name)
+                result.timeseries_buffer.seek(0)
+                blob_client.upload_blob(
+                    result.timeseries_buffer, overwrite=True, max_concurrency=4
+                )
+                output_paths[table_type] = f"{table_type}/{filename}"
+                # Free buffer after upload
+                result.timeseries_buffer.close()
+                result.timeseries_buffer = None
+                continue
+
+            # In-memory tables (filemeta, channel, statistics, or small timeseries)
+            if table is None:
+                continue
+            if table.num_rows == 0 and table_type not in ("filemeta", "statistics"):
+                continue
 
             buf = io.BytesIO()
             pq.write_table(table, buf,

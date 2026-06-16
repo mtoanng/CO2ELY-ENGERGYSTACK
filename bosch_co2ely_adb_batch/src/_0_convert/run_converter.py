@@ -33,7 +33,8 @@ Deduplication:
 Scalability (two-level parallelism):
   Level 1 (inter-node): Spark distributes partitions across workers
   Level 2 (intra-node): ThreadPoolExecutor within each partition
-  spark.task.cpus=4 aligns scheduler slots with actual thread usage
+  spark.task.cpus=2 → 8 slots per E16 worker → 16 concurrent files max
+  Partition strategy: fill all task slots first (1 file per partition when possible)
 """
 import os
 import sys
@@ -55,16 +56,24 @@ _SRC_DIR = str(Path(__file__).resolve().parent)
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
+# Module-level import required for _process_single_file (called via addPyFile workers)
+from common import build_abfss_path
+
 
 # =============================================================================
 # TUNING CONSTANTS
 # =============================================================================
 
-# Files per Spark partition (batch size per task)
-FILES_PER_PARTITION = 10
-
 # Threads per partition (concurrent files within a single Spark task)
-THREADS_PER_PARTITION = 4
+# Each task processes its files using a ThreadPoolExecutor with this many workers.
+# Polars/calamine release GIL → real parallelism across threads.
+THREADS_PER_PARTITION = 2
+
+# Cluster topology (used to calculate optimal partition count)
+# Priority: fill all task slots first → 1 file per partition when possible
+# Only batch multiple files per partition when num_files > total_slots
+CORES_PER_WORKER = 16   # Standard_E16as_v4
+MAX_WORKERS = 2         # autoscale max
 
 # Retry config for transient errors
 MAX_RETRIES = 3
@@ -416,7 +425,6 @@ def main():
     logger.info(f"  Tracking table: {tracking_table}")
     logger.info(f"  Extensions: {target_extensions}")
     logger.info(f"  Integration test: {is_int_test}")
-    logger.info(f"  Files/partition: {files_per_partition}")
     logger.info(f"  Threads/partition: {threads_per_partition}")
     logger.info(f"  Max retries (transient): {MAX_RETRIES}")
     logger.info(f"  Max total retries (across runs): {MAX_TOTAL_RETRIES}")
@@ -456,9 +464,17 @@ def main():
         return
 
     # --- 3. Distribute to workers via Spark ---
-    num_partitions = max(1, (len(new_blobs) + files_per_partition - 1) // files_per_partition)
+    # Strategy: MAXIMIZE parallelism by filling all available task slots.
+    # Each file gets its own partition (= own task) when possible.
+    # Only batch files into a partition when num_files exceeds total slots.
+    task_cpus = int(spark.conf.get("spark.task.cpus", "2"))
+    slots_per_worker = CORES_PER_WORKER // task_cpus
+    total_slots = slots_per_worker * MAX_WORKERS
+    num_partitions = min(len(new_blobs), total_slots)
+    files_per_partition = (len(new_blobs) + num_partitions - 1) // num_partitions
     logger.info(f"Partitions: {num_partitions} (for {len(new_blobs)} files, "
-                f"{files_per_partition} files/partition)")
+                f"~{files_per_partition} files/partition, "
+                f"{total_slots} total slots across {MAX_WORKERS} workers)")
 
     # Build input DataFrame with ADLS config carried per-row
     file_rows = [

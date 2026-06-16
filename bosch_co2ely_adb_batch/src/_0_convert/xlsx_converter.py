@@ -12,6 +12,12 @@ Schema:
 I/O: Receives raw bytes (downloaded by Azure SDK in worker).
 Polars + calamine engine (Rust-native parsing, releases GIL).
 Parallelism: Sheets are processed in parallel via ThreadPoolExecutor.
+
+Memory safety:
+- Large sheets (n_rows × n_cols > TIMESERIES_CHUNK_THRESHOLD) use chunked unpivot:
+  process CHUNK_ROWS at a time → write Parquet row groups to temp file.
+  Peak memory bounded to chunk_size × n_cols × ~80 bytes regardless of file size.
+- Sheet threads capped at MAX_SHEET_THREADS to prevent thread explosion.
 """
 import io
 import polars as pl
@@ -21,10 +27,15 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from common import (
-    SCHEMAS, ConversionResult, generic_unpivot, generate_file_uuid,
-    build_filemeta, build_channel, build_statistics,
+    SCHEMAS, ConversionResult, generic_unpivot, generic_unpivot_chunked,
+    generate_file_uuid, build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,
+    CHUNK_ROWS, TIMESERIES_CHUNK_THRESHOLD,
 )
+
+# Cap sheet-level parallelism to prevent thread explosion on multi-sheet files.
+# Benchmark shows ~2 cores/file already includes nested sheet parallelism.
+MAX_SHEET_THREADS = 3
 
 
 def _process_sheet(
@@ -122,14 +133,34 @@ def _process_sheet(
     # file_path: full abfss:// URI if available, else relative_path
     filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified)
     channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
-    timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 
-    return ConversionResult(
-        tables={"filemeta": filemeta, "channel": channel,
-                "timeseries": timeseries, "statistics": statistics},
-        group_name=sheet_name, n_rows=n_rows, n_channels=n_channels,
-    )
+    # Decide: in-memory unpivot (small) vs chunked unpivot (large)
+    total_timeseries_cells = n_rows * n_channels
+
+    if total_timeseries_cells > TIMESERIES_CHUNK_THRESHOLD:
+        # CHUNKED PATH: write timeseries to BytesIO buffer (no disk I/O).
+        # Peak memory = CHUNK_ROWS × n_channels × ~80 bytes + compressed buffer.
+        ts_rows, ts_buffer = generic_unpivot_chunked(
+            df, file_uuid, sheet_name, columns, CHUNK_ROWS
+        )
+        logger.info(f"    Chunked unpivot: {n_rows} rows × {n_channels} cols = "
+                    f"{ts_rows:,} ts rows, chunk_size={CHUNK_ROWS}")
+
+        return ConversionResult(
+            tables={"filemeta": filemeta, "channel": channel,
+                    "timeseries": None, "statistics": statistics},
+            group_name=sheet_name, n_rows=n_rows, n_channels=n_channels,
+            timeseries_buffer=ts_buffer,
+        )
+    else:
+        # IN-MEMORY PATH: small file, standard unpivot (fast, no disk I/O)
+        timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
+        return ConversionResult(
+            tables={"filemeta": filemeta, "channel": channel,
+                    "timeseries": timeseries, "statistics": statistics},
+            group_name=sheet_name, n_rows=n_rows, n_channels=n_channels,
+        )
 
 
 def convert(
@@ -177,9 +208,11 @@ def convert(
         return results
 
     # Multi-sheet -> parallel processing (Polars releases GIL)
-    logger.info(f"  {relative_path}: {len(sheet_names)} sheets -> parallel processing")
+    # Cap threads to MAX_SHEET_THREADS to avoid thread explosion + memory pressure
+    n_threads = min(len(sheet_names), MAX_SHEET_THREADS)
+    logger.info(f"  {relative_path}: {len(sheet_names)} sheets -> parallel ({n_threads} threads)")
     results = []
-    with ThreadPoolExecutor(max_workers=len(sheet_names)) as executor:
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
         futures = {
             executor.submit(
                 _process_sheet, file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified, abfss_file_path
