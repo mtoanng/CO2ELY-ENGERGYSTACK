@@ -102,6 +102,11 @@ CONVERTER_CONFIG = {
     "tracking_table_name": "file_tracking",
 }
 
+# Output table types produced by the converter (4 Parquet table types).
+# Defined here (not in common.py) so downstream stages can import without
+# pulling in heavy dependencies (polars, pyarrow) that converter needs.
+TABLE_TYPES = ["filemeta", "channel", "timeseries", "statistics"]
+
 
 # =============================================================================
 # HELPER FUNCTIONS (pemely-compatible API)

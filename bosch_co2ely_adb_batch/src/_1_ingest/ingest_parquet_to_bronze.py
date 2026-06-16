@@ -32,18 +32,16 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Add shared config and converter packages to path
+# Add shared config to path (no heavy deps like polars/pyarrow needed here)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_common"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_0_convert"))
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp, lit
 
 from common_config import (
     env_variables, medallion_variables, layer_variables,
-    build_table_name, CONVERTER_CONFIG, logger,
+    build_table_name, CONVERTER_CONFIG, TABLE_TYPES, logger,
 )
-from common import TABLE_TYPES
 
 
 # =============================================================================
