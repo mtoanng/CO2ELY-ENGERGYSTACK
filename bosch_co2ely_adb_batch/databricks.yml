@@ -1,6 +1,5 @@
 # Databricks Asset Bundle definition for co_energystack_pipeline.
 # CO₂ Electrolysis measurement data pipeline (XLSX/CSV → Parquet → Delta).
-# Architecture modeled on bosch_ely_adb_batch (TBP-ADB).
 #
 # Auth: cluster identity via run_as SP (sp-co2ely-energystack).
 # SP has Storage Blob Data Contributor on stpsbdodxdev2datalake.
@@ -17,7 +16,7 @@ include:
   - resources/*.yml
 
 # =============================================================================
-# VARIABLES (same pattern as TBP databricks.yml)
+# VARIABLES
 # =============================================================================
 variables:
   notification_recipients:
@@ -55,7 +54,7 @@ variables:
     description: Node type for static single-node jobs (converter)
     default: "Standard_D16as_v4"
 
-  # --- Per-layer task parameters (same as TBP) ---
+  # --- Per-layer task parameters ---
   bronze_task_params:
     description: Bronze Auto Loader task parameters
     type: complex
@@ -66,7 +65,7 @@ variables:
       - "${bundle.environment}"
 
 # =============================================================================
-# TARGETS (same as TBP)
+# TARGETS 
 # =============================================================================
 targets:
   dev_user:

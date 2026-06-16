@@ -372,7 +372,7 @@ def parse_args():
     return args
 
 
-def main():
+def main():  
     """Driver entry point: discover files, distribute to workers, merge results.
 
     Orchestrates the full conversion pipeline:

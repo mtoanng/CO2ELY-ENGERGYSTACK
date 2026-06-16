@@ -3,7 +3,6 @@
 Runs OPTIMIZE (bin-packing) on all co2ely Delta tables.
 Scheduled weekly or on-demand.
 
-Same pattern as TBP sys_optimize_tables.py.
 """
 import sys
 import argparse

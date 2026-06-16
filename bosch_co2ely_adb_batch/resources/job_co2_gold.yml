@@ -8,7 +8,7 @@ common_gold_job_settings: &common_gold_job_settings
     - name: "env"
       default: ${bundle.environment}
   permissions:
-    - group_name: "idm2bcd_dssi03prod_pemely_data"
+    - group_name: "idm2bcd_dssi03prod_co2elyd_data"
       level: "CAN_MANAGE"
   max_concurrent_runs: 2
   job_clusters:

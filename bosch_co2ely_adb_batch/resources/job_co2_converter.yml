@@ -1,5 +1,5 @@
 # =============================================================================
-# REUSABLE COMPONENTS (same pattern as TBP job_ely_bronze.yml)
+# REUSABLE COMPONENTS
 # =============================================================================
 
 # --- Base cluster config (dev: single-node) ---
@@ -57,7 +57,7 @@ _converter_cluster_scaled: &converter_cluster_scaled
     product_department_team: "ELY"
     project: "CO_energystack"
 
-# --- Common job-level settings (same as TBP) ---
+# --- Common job-level settings ---
 _converter_job_base: &converter_job_base
   parameters:
     - name: "is_integration_test"
@@ -65,7 +65,7 @@ _converter_job_base: &converter_job_base
     - name: "env"
       default: ${bundle.environment}
   permissions:
-    - group_name: "idm2bcd_dssi03prod_pemely_data"
+    - group_name: "idm2bcd_dssi03prod_co2elyd_data"
       level: "CAN_MANAGE"
   max_concurrent_runs: 1
 

@@ -47,7 +47,7 @@ if not logger.handlers:
 
 
 # =============================================================================
-# ENVIRONMENT CONFIG (same pattern as TBP common_utils.py)
+# ENVIRONMENT CONFIG
 # =============================================================================
 
 ENVIRONMENT_CONFIG = {
@@ -83,7 +83,7 @@ CONVERTER_CONFIG = {
 
 
 def get_env_variables(spark) -> dict:
-    """Retrieve environment config based on workspace URL (same as TBP).
+    """Retrieve environment config based on workspace URL .
 
     Args:
         spark: Active SparkSession instance.

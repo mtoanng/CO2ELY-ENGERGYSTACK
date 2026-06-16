@@ -1,6 +1,6 @@
 """Shared utilities for the CO₂ energystack pipeline.
 
-Conventions (same as TBP bosch_ely_adb_batch):
+Conventions (bosch_ely_adb_batch):
 - Environment detection (dev/qa/prod) via workspace host
 - Medallion layer variables (catalog, schema, ADLS paths)
 - Argument parsing for job parameters

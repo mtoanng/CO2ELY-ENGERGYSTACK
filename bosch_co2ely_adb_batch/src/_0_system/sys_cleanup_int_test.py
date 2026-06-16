@@ -1,6 +1,5 @@
 """System: List integration test tables for manual cleanup.
 
-Same pattern as TBP sys_delete_tables_and_dirs.py.
 Lists all _int_test suffixed tables created during integration testing.
 Operator uses output to manually clean via SQL editor.
 

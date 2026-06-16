@@ -3,7 +3,7 @@
 Production Databricks batch pipeline for CO₂ electrolysis analytics.  
 **Migrated from** the CO_energystacck Dash app (Azure App Service) to Databricks Jobs.
 
-Built as a **Declarative Automation Bundle** (DAB), modeled on `bosch_ely_adb_batch` (TBP-ADB).
+Built as a **Declarative Automation Bundle** (DAB).
 
 ## Key Migration Decisions
 
@@ -42,7 +42,7 @@ UC Volume (.xlsx uploads)
 
 ```
 CO-ESTACK-ADB/                          ← Git repo root
-└── co_energystack_pipeline/            ← Bundle root (like TBP-ADB/bosch_ely_adb_batch/)
+└── co_energystack_pipeline/            ← Bundle root
     ├── databricks.yml
     ├── .gitignore
     ├── resources/

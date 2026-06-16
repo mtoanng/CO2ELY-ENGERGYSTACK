@@ -6,7 +6,6 @@ Checks:
 3. Row counts are non-zero (or match expected ranges)
 4. No orphan UUIDs (referential integrity between tables)
 
-Same pattern as TBP sys_validate_tables.py.
 """
 import sys
 import json
