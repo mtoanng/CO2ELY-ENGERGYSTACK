@@ -32,7 +32,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Add shared config to path (no heavy deps like polars/pyarrow needed here).
+# Add shared config to path.
 # Databricks spark_python_task runs via exec() where __file__ is not defined.
 # Fallback: co_filename from the code object IS set by compile().
 try:
@@ -89,7 +89,7 @@ def main():
 
     is_integration_test = args.is_integration_test.lower() == "true"
 
-    # --- Resolve environment (pemely-style 3-tier config) ---
+    # --- Resolve environment ---
     env = env_variables(spark)
     environment = env["environment"]
     catalog = env["unity_catalog"]
@@ -186,7 +186,7 @@ def main():
     tracking_records = []
 
     for table_type in TABLE_TYPES:
-        # Build table name using pemely-style helper
+        # Build table name
         bronze_table = build_table_name(
             catalog, schema, write_medal["table_prefix"], table_type, is_integration_test
         )
@@ -205,7 +205,7 @@ def main():
             total_rows[table_type] = 0
             continue
 
-        # Read all Parquet files in one shot (UC External Location handles auth)
+        # Read all Parquet files
         logger.info(f"  {table_type}: reading {len(parquet_paths)} Parquet file(s)")
         df = spark.read.option("mergeSchema", "true").parquet(*parquet_paths)
 

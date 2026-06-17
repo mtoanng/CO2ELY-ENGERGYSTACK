@@ -46,7 +46,7 @@ variables:
     default: "15.4.x-scala2.12"
   scaled_node_type:
     description: Worker node type for autoscaled pipeline jobs
-    default: "Standard_E16as_v4"
+    default: "Standard_D16as_v4"
   scaled_driver_type:
     description: Driver node type for autoscaled pipeline jobs
     default: "Standard_D16as_v4"

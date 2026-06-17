@@ -1,4 +1,4 @@
-"""ELY project environment & medallion config (aligned with TBP-ADB pemely convention).
+"""ELY project environment & medallion config.
 
 Three-tier config structure:
   ENVIRONMENT_VARIABLES  -> workspace URL -> {env, adls_domain, catalog}
@@ -109,7 +109,7 @@ TABLE_TYPES = ["filemeta", "channel", "timeseries", "statistics"]
 
 
 # =============================================================================
-# HELPER FUNCTIONS (pemely-compatible API)
+# HELPER FUNCTIONS
 # =============================================================================
 
 def env_variables(spark, env_override: str = None) -> dict:
