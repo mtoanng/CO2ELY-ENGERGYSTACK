@@ -1,18 +1,18 @@
-"""Bronze ingestion: Converter Parquet output -> Delta tables.
+"""Bronze ingestion: Converter Parquet output -> Delta tables (Auto Loader).
 
-Reads Parquet files produced by the converter stage (_0_convert) and writes
-them into Unity Catalog Delta tables. Uses the converter's tracking table
-as the source of truth — only ingests files with status='SUCCESS' that
-haven't been ingested into bronze yet.
+Uses Structured Streaming with cloudFiles (Auto Loader) + Trigger.AvailableNow
+for incremental, exactly-once ingestion. No custom tracking table needed —
+Auto Loader handles deduplication via checkpoints.
 
 Architecture:
-- Reads Parquet from ADLS via abfss:// (External Location + UC credential vending)
-- Spark reads Parquet natively (no Polars needed at this stage)
-- Writes to 4 Delta tables: filemeta, channel, timeseries, statistics
-- Tracks its own bronze watermark to avoid re-ingesting
+- Auto Loader discovers new Parquet files in parquet_raw/{table_type}/
+- Trigger.AvailableNow processes all new files then stops (batch-like)
+- One stream per table_type (filemeta, channel, timeseries, statistics)
+- Checkpoints stored in ADLS: parquet_raw/_checkpoints/bronze_{table_type}/
+- Writes to 4 Delta tables with append mode + schema evolution
 - No Azure SDK credentials needed — UC External Location handles auth
 
-Tables written (all in same schema as converter tracking):
+Tables written:
   {catalog}.{schema}.bronze_filemeta
   {catalog}.{schema}.bronze_channel
   {catalog}.{schema}.bronze_timeseries    (liquid clustered by uuid, group)
@@ -25,10 +25,8 @@ Usage (via Databricks job):
           - "--is_integration_test" / "--env"
 """
 import sys
-import json
 import time
 import argparse
-import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -42,7 +40,7 @@ except NameError:
 sys.path.insert(0, str(_THIS_DIR.parent / "_common"))
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp, lit
+from pyspark.sql.functions import current_timestamp
 
 from common_config import (
     env_variables, medallion_variables, layer_variables,
@@ -51,31 +49,11 @@ from common_config import (
 
 
 # =============================================================================
-# CONFIG
-# =============================================================================
-
-# Bronze tracking table name (tracks which converter outputs have been ingested)
-BRONZE_TRACKING_TABLE_SUFFIX = "bronze_ingest_tracking"
-
-
-# =============================================================================
-# HELPERS
-# =============================================================================
-
-def build_abfss_path(storage_account: str, container: str, blob_path: str) -> str:
-    """Build abfss:// URI for reading Parquet from ADLS.
-
-    Uses UC External Location for auth (credential vending, zero secrets).
-    """
-    return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{blob_path}"
-
-
-# =============================================================================
 # MAIN
 # =============================================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="ELY Bronze Ingestion")
+    parser = argparse.ArgumentParser(description="ELY Bronze Ingestion (Auto Loader)")
     parser.add_argument("--is_integration_test", type=str, default="false")
     parser.add_argument("--env", type=str, default="dev_user")
     args, _ = parser.parse_known_args()
@@ -107,162 +85,96 @@ def main():
     adls_domain = env.get("adls_domain") or ""
     storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
-    # Converter tracking table (lives in write schema)
-    converter_tracking = f"{catalog}.{schema}.{CONVERTER_CONFIG['tracking_table_name']}"
-
     if is_integration_test:
-        converter_tracking = converter_tracking.replace("file_tracking", "file_tracking_int_test")
         output_prefix = f"{output_prefix}/_int_test"
 
-    # Bronze tracking table
-    suffix = "_int_test" if is_integration_test else ""
-    bronze_tracking = f"{catalog}.{schema}.{BRONZE_TRACKING_TABLE_SUFFIX}{suffix}"
+    # Base ADLS path for converter output
+    base_path = f"abfss://{container}@{storage_account}.dfs.core.windows.net/{output_prefix}"
+    checkpoint_base = f"abfss://{container}@{storage_account}.dfs.core.windows.net/{output_prefix}/_checkpoints"
 
     logger.info(f"{'='*60}")
-    logger.info(f"ELY Bronze Ingestion")
+    logger.info("ELY Bronze Ingestion (Auto Loader)")
     logger.info(f"  Environment: {environment}")
     logger.info(f"  Catalog.Schema: {catalog}.{schema}")
-    logger.info(f"  Storage: {storage_account}/{container}/{output_prefix}")
-    logger.info(f"  Converter tracking: {converter_tracking}")
-    logger.info(f"  Bronze tracking: {bronze_tracking}")
+    logger.info(f"  Source: {base_path}/{{table_type}}/")
+    logger.info(f"  Checkpoints: {checkpoint_base}/")
+    logger.info(f"  Integration test: {is_integration_test}")
     logger.info(f"{'='*60}")
 
-    # =========================================================================
-    # STEP 1: Ensure schema + tracking table exist
-    # =========================================================================
+    # Ensure schema exists
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {bronze_tracking} (
-            file_uuid STRING,
-            blob_path STRING,
-            table_type STRING,
-            bronze_table STRING,
-            rows_written BIGINT,
-            ingested_at TIMESTAMP
-        ) USING DELTA
-    """)
 
     # =========================================================================
-    # STEP 2: Find converter outputs not yet ingested into bronze
-    # =========================================================================
-    try:
-        converter_success = spark.sql(f"""
-            SELECT file_uuid, blob_path, output_paths
-            FROM {converter_tracking}
-            WHERE status = 'SUCCESS' AND output_paths IS NOT NULL
-        """)
-    except Exception as e:
-        logger.warning(f"Converter tracking table not ready: {e}")
-        print("Pipeline Summary: converter tracking table not available")
-        return
-
-    # Anti-join: only new records not yet ingested
-    try:
-        already_ingested = spark.sql(f"""
-            SELECT DISTINCT file_uuid FROM {bronze_tracking}
-        """)
-        new_records = converter_success.join(
-            already_ingested, on="file_uuid", how="left_anti"
-        )
-    except Exception:
-        # Bronze tracking empty or doesn't exist yet — ingest everything
-        new_records = converter_success
-
-    new_records_list = new_records.collect()
-
-    if not new_records_list:
-        logger.info("No new converter outputs to ingest.")
-        total_time = time.perf_counter() - t_start
-        print(f"\n{'='*60}")
-        print(f"Bronze Ingest Summary: no_new_data ({total_time:.1f}s)")
-        return
-
-    logger.info(f"New files to ingest into bronze: {len(new_records_list)}")
-
-    # =========================================================================
-    # STEP 3: Read Parquet from ADLS (abfss://) and write to Delta
+    # Auto Loader: one stream per table_type
     # =========================================================================
     total_rows = {}
-    tracking_records = []
 
     for table_type in TABLE_TYPES:
-        # Build table name
         bronze_table = build_table_name(
             catalog, schema, write_medal["table_prefix"], table_type, is_integration_test
         )
+        source_path = f"{base_path}/{table_type}/"
+        checkpoint_path = f"{checkpoint_base}/bronze_{table_type}"
 
-        # Collect all Parquet paths for this table_type
-        parquet_paths = []
-        for row in new_records_list:
-            output_paths = json.loads(row.output_paths) if row.output_paths else {}
-            if table_type in output_paths:
-                blob_path = f"{output_prefix}/{output_paths[table_type]}"
-                abfss_path = build_abfss_path(storage_account, container, blob_path)
-                parquet_paths.append(abfss_path)
+        logger.info(f"  {table_type}: Auto Loader from {source_path}")
 
-        if not parquet_paths:
-            logger.info(f"  {table_type}: no Parquet files to ingest")
-            total_rows[table_type] = 0
-            continue
+        # Read with Auto Loader (cloudFiles)
+        stream_df = (
+            spark.readStream
+            .format("cloudFiles")
+            .option("cloudFiles.format", "parquet")
+            .option("cloudFiles.schemaLocation", checkpoint_path)
+            .option("cloudFiles.inferColumnTypes", "true")
+            .option("cloudFiles.schemaEvolutionMode", "addNewColumns")
+            .load(source_path)
+            .withColumns({"_bronze_ingested_at": current_timestamp()})
+        )
 
-        # Read all Parquet files
-        logger.info(f"  {table_type}: reading {len(parquet_paths)} Parquet file(s)")
-        df = spark.read.option("mergeSchema", "true").parquet(*parquet_paths)
+        # Write with Trigger.AvailableNow (process all new files, then stop)
+        query = (
+            stream_df.writeStream
+            .format("delta")
+            .outputMode("append")
+            .option("checkpointLocation", checkpoint_path)
+            .option("mergeSchema", "true")
+            .trigger(availableNow=True)
+            .toTable(bronze_table)
+        )
 
-        # Add ingestion metadata
-        df = df.withColumn("_bronze_ingested_at", current_timestamp())
+        # Wait for this stream to finish
+        query.awaitTermination()
 
-        # Count rows (Parquet footer has counts — no full scan needed)
-        row_count = df.count()
+        # Get rows written from stream progress
+        rows_written = 0
+        if query.lastProgress and query.lastProgress.get("numInputRows"):
+            rows_written = query.lastProgress["numInputRows"]
+        else:
+            # Fallback: sum from all progress updates
+            for p in (query.recentProgress or []):
+                rows_written += p.get("numInputRows", 0)
 
-        # Write to Delta (append, mergeSchema for forward compatibility)
-        df.write.format("delta") \
-            .mode("append") \
-            .option("mergeSchema", "true") \
-            .saveAsTable(bronze_table)
+        total_rows[table_type] = rows_written
+        logger.info(f"  {table_type}: ingested {rows_written:,} rows -> {bronze_table}")
 
-        # Enable liquid clustering on timeseries (largest table) for query perf
-        if table_type == "timeseries":
+        # Enable liquid clustering on timeseries (largest table)
+        if table_type == "timeseries" and rows_written > 0:
             try:
                 spark.sql(f"ALTER TABLE {bronze_table} CLUSTER BY (uuid, `group`)")
             except Exception:
-                pass  # Already clustered or not supported — non-fatal
-
-        total_rows[table_type] = row_count
-        logger.info(f"  {table_type}: wrote {row_count:,} rows to {bronze_table}")
-
-        # Track per-file contribution (approximate)
-        rows_per_file = row_count // max(1, len(parquet_paths))
-        for row in new_records_list:
-            output_paths = json.loads(row.output_paths) if row.output_paths else {}
-            if table_type in output_paths:
-                tracking_records.append((
-                    row.file_uuid, row.blob_path, table_type, bronze_table, rows_per_file,
-                ))
+                pass  # Already clustered or not supported
 
     # =========================================================================
-    # STEP 4: Update bronze tracking table
-    # =========================================================================
-    if tracking_records:
-        from pyspark.sql import Row as SparkRow
-        tracking_rows = [
-            SparkRow(file_uuid=r[0], blob_path=r[1], table_type=r[2],
-                     bronze_table=r[3], rows_written=r[4],
-                     ingested_at=datetime.now(tz=timezone.utc))
-            for r in tracking_records
-        ]
-        tracking_df = spark.createDataFrame(tracking_rows)
-        tracking_df.write.format("delta").mode("append").saveAsTable(bronze_tracking)
-
     # Summary
+    # =========================================================================
     total_time = time.perf_counter() - t_start
+    total_ingested = sum(total_rows.values())
     print(f"\n{'='*60}")
-    print("Bronze Ingest Summary:")
+    print("Bronze Ingest Summary (Auto Loader):")
     print(f"  Environment: {environment}")
     print(f"  Integration test: {is_integration_test}")
-    print(f"  Files ingested: {len(new_records_list)}")
     for tt, count in total_rows.items():
         print(f"  {tt}: {count:,} rows")
+    print(f"  Total rows: {total_ingested:,}")
     print(f"  Total time: {total_time:.1f}s")
 
 
