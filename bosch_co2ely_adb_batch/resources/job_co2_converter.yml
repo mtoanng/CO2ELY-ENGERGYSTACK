@@ -18,7 +18,7 @@ _converter_cluster_base: &converter_cluster_base
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
-    AZURE_CLIENT_SECRET: "{{secrets/co2ely-scope/sp-client-secret}}"
+    AZURE_CLIENT_SECRET: "{{secrets/kv-databricks-secret-scope-tbp/sp-co2ely-client-secret}}"
   azure_attributes:
     availability: "SPOT_WITH_FALLBACK_AZURE"
     first_on_demand: 1
@@ -49,7 +49,7 @@ _converter_cluster_scaled: &converter_cluster_scaled
   spark_env_vars:
     AZURE_TENANT_ID: "0ae51e19-07c8-4e4b-bb6d-648ee58410f4"
     AZURE_CLIENT_ID: "57029129-abb0-4ec9-9b85-25fffb4af624"
-    AZURE_CLIENT_SECRET: "{{secrets/co2ely-scope/sp-client-secret}}"
+    AZURE_CLIENT_SECRET: "{{secrets/kv-databricks-secret-scope-tbp/sp-co2ely-client-secret}}"
   azure_attributes:
     availability: "SPOT_WITH_FALLBACK_AZURE"
     first_on_demand: 1
@@ -110,12 +110,6 @@ common_converter_job_settings: &common_converter_job_settings
       new_cluster:
         <<: *converter_cluster_base
         data_security_mode: SINGLE_USER
-
-  # Tasks run in PARALLEL (no depends_on between xlsx and csv).
-  # Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
-  # I/O: Azure SDK (parallel HTTP download/upload, zero JVM).
-  # Distribution: Spark mapPartitions + ThreadPoolExecutor per partition.
-  # Scheduling: spark.task.cpus=4 → 4 slots per E16 worker → 16 concurrent files.
   tasks: &converter_tasks
     - task_key: tsk_co2_convert_xlsx
       run_if: "ALL_SUCCESS"
@@ -132,20 +126,20 @@ common_converter_job_settings: &common_converter_job_settings
       libraries: *converter_libs_xlsx
       timeout_seconds: 3600
 
-    - task_key: tsk_co2_convert_csv
-      run_if: "ALL_SUCCESS"
-      job_cluster_key: job_cluster
-      spark_python_task:
-        python_file: ../src/_0_convert/run_converter.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
-          - "--extensions"
-          - ".csv"
-      libraries: *converter_libs_csv
-      timeout_seconds: 3600
+    # - task_key: tsk_co2_convert_csv
+    #   run_if: "ALL_SUCCESS"
+    #   job_cluster_key: job_cluster
+    #   spark_python_task:
+    #     python_file: ../src/_0_convert/run_converter.py
+    #     parameters:
+    #       - "--is_integration_test"
+    #       - "{{job.parameters.is_integration_test}}"
+    #       - "--env"
+    #       - "${bundle.environment}"
+    #       - "--extensions"
+    #       - ".csv"
+    #   libraries: *converter_libs_csv
+    #   timeout_seconds: 3600
 
 # Setting for production (multi-worker, autoscale 1-4)
 common_converter_job_settings_prod: &common_converter_job_settings_prod

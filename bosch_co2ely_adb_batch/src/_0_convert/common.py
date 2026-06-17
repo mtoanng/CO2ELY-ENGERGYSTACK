@@ -76,7 +76,7 @@ ENVIRONMENT_CONFIG = {
 
 CONVERTER_CONFIG = {
     "schema": "converter",
-    "source_prefix": "raw_data",
+    "source_prefix": "test",
     "output_prefix": "parquet_raw",
     "tracking_table_name": "file_tracking",
 }
