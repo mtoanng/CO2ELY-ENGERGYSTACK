@@ -32,8 +32,14 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Add shared config to path (no heavy deps like polars/pyarrow needed here)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_common"))
+# Add shared config to path (no heavy deps like polars/pyarrow needed here).
+# Databricks spark_python_task runs via exec() where __file__ is not defined.
+# Fallback: co_filename from the code object IS set by compile().
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent / "_common"))
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp, lit

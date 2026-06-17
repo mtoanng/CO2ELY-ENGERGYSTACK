@@ -33,8 +33,9 @@ Deduplication:
 Scalability (two-level parallelism):
   Level 1 (inter-node): Spark distributes partitions across workers
   Level 2 (intra-node): ThreadPoolExecutor within each partition
-  spark.task.cpus=2 → 8 slots per E16 worker → 16 concurrent files max
-  Partition strategy: fill all task slots first (1 file per partition when possible)
+  spark.task.cpus=4 → 4 slots per E16 worker → 16 concurrent files max
+  Benchmark: 4T×4thr fastest (fewer SDK pools = better HTTP reuse)
+  Partition strategy: fill all task slots first, then batch remaining
 """
 import os
 import sys
@@ -51,8 +52,13 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, LongType, DoubleType, TimestampType,
 )
 
-# Add source directory to path for imports
-_SRC_DIR = str(Path(__file__).resolve().parent)
+# Add source directory to path for imports.
+# Databricks spark_python_task runs files via exec(compile(...)) which does NOT
+# define __file__. Fallback: co_filename from the code object IS set by compile().
+try:
+    _SRC_DIR = str(Path(__file__).resolve().parent)
+except NameError:
+    _SRC_DIR = str(Path(sys._getframe().f_code.co_filename).resolve().parent)
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
@@ -490,8 +496,8 @@ def main():
         for b in new_blobs
     ]
 
-    # Distribute source modules for worker imports
-    src_dir = Path(__file__).resolve().parent
+    # Distribute source modules for worker imports (uses _SRC_DIR computed at top)
+    src_dir = Path(_SRC_DIR)
     for module_file in ["common.py", "xlsx_converter.py", "csv_converter.py"]:
         module_path = str(src_dir / module_file)
         spark.sparkContext.addPyFile(module_path)
