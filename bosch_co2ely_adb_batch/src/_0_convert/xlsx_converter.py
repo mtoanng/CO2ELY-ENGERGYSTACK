@@ -14,9 +14,9 @@ Polars + calamine engine (Rust-native parsing, releases GIL).
 Parallelism: Sheets are processed in parallel via ThreadPoolExecutor.
 
 Memory safety:
-- Large sheets (n_rows × n_cols > TIMESERIES_CHUNK_THRESHOLD) use chunked unpivot:
+- Large sheets (n_rows * n_cols > TIMESERIES_CHUNK_THRESHOLD) use chunked unpivot:
   process CHUNK_ROWS at a time → write Parquet row groups to temp file.
-  Peak memory bounded to chunk_size × n_cols × ~80 bytes regardless of file size.
+  Peak memory bounded to chunk_size * n_cols * ~80 bytes regardless of file size.
 - Sheet threads capped at MAX_SHEET_THREADS to prevent thread explosion.
 """
 import io
@@ -34,10 +34,6 @@ from common import (
 )
 
 # Sheet-level parallelism DISABLED when file-level threading is active.
-# With THREADS_PER_PARTITION=4, file-level concurrency already saturates CPU.
-# Nested sheet threads would cause: 4 tasks × 4 files × N sheets = thread explosion.
-# Each sheet still re-decompresses the full xlsx via calamine (~1.5 GB per call).
-# Sequential sheets within a file keeps memory predictable.
 MAX_SHEET_THREADS = 1
 
 
@@ -93,7 +89,7 @@ def _process_sheet(
     row2_channel_name = [str(header_df[c][1] or "") for c in col_names]
     row2_channel_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_channel_name)]
 
-    # Ensure unique channel identifiers (row 1 may have duplicates)
+    # Ensure unique channel identifiers
     seen = {}
     unique_channels = []
     for ch in row1_channel:
@@ -138,16 +134,14 @@ def _process_sheet(
     channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 
-    # Decide: in-memory unpivot (small) vs chunked unpivot (large)
     total_timeseries_cells = n_rows * n_channels
 
     if total_timeseries_cells > TIMESERIES_CHUNK_THRESHOLD:
-        # CHUNKED PATH: write timeseries to BytesIO buffer (no disk I/O).
-        # Peak memory = CHUNK_ROWS × n_channels × ~80 bytes + compressed buffer.
+        # Write timeseries to BytesIO buffer.
         ts_rows, ts_buffer = generic_unpivot_chunked(
             df, file_uuid, sheet_name, columns, CHUNK_ROWS
         )
-        logger.info(f"    Chunked unpivot: {n_rows} rows × {n_channels} cols = "
+        logger.info(f"    Chunked unpivot: {n_rows} rows * {n_channels} cols = "
                     f"{ts_rows:,} ts rows, chunk_size={CHUNK_ROWS}")
 
         return ConversionResult(
@@ -157,7 +151,7 @@ def _process_sheet(
             timeseries_buffer=ts_buffer,
         )
     else:
-        # IN-MEMORY PATH: small file, standard unpivot (fast, no disk I/O)
+        # Standard unpivot
         timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
         return ConversionResult(
             tables={"filemeta": filemeta, "channel": channel,
@@ -194,7 +188,7 @@ def convert(
     """
     import fastexcel
 
-    # UUID from relative_path (environment-independent, matches tracking table)
+    # UUID from relative_path
     file_uuid = generate_file_uuid(relative_path)
 
     # fastexcel for sheet name discovery (reads from bytes)

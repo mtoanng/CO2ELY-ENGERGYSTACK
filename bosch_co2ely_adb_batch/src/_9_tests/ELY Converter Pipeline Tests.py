@@ -182,10 +182,10 @@ if results:
            "V" in units_col and "mA" in units_col and "°C" in units_col,
            f"units={units_col}")
 
-    # Check timeseries (4 data rows × 4 channels = 16 long-format rows)
+    # Check timeseries (4 data rows * 4 channels = 16 long-format rows)
     ts = r.tables["timeseries"]
     record("timeseries row count", ts.num_rows == 16,
-           f"expected 16 (4×4), got {ts.num_rows}")
+           f"expected 16 (4*4), got {ts.num_rows}")
 
     # Check statistics
     stats = r.tables["statistics"]
@@ -224,10 +224,10 @@ if results:
            set(r.tables.keys()) == {"filemeta", "channel", "timeseries", "statistics"},
            f"keys={list(r.tables.keys())}")
 
-    # 3 data rows × 4 channels = 12 timeseries rows
+    # 3 data rows * 4 channels = 12 timeseries rows
     ts = r.tables["timeseries"]
     record("CSV timeseries count", ts.num_rows == 12,
-           f"expected 12 (3×4), got {ts.num_rows}")
+           f"expected 12 (3*4), got {ts.num_rows}")
 
     # Verify numeric values parsed
     values = ts.column("value").to_pylist()
@@ -250,7 +250,7 @@ wide_df = pl.DataFrame({
 
 result = generic_unpivot(wide_df, "test-uuid", "group1", ["ch_A", "ch_B"])
 
-# Should be 3 rows × 2 channels = 6 rows
+# Should be 3 rows * 2 channels = 6 rows
 record("Unpivot row count", result.num_rows == 6, f"got {result.num_rows}")
 
 # Check schema matches SCHEMAS["timeseries"]
@@ -344,7 +344,7 @@ threads_per_partition = 2
 worker_cores = 16
 slots_per_worker = worker_cores // spark_task_cpus
 files_concurrent_per_worker = slots_per_worker * threads_per_partition
-record("Concurrent formula: 16cores/4cpus×2threads=8",
+record("Concurrent formula: 16cores/4cpus*2threads=8",
        files_concurrent_per_worker == 8)
 
 # COMMAND ----------
@@ -722,7 +722,7 @@ print(f"    Expected rounds per partition (with FPP={TEST_FPP}): {TEST_FPP} / {T
 print(f"    Partition sizes: {partition_sizes}")
 for i, size in enumerate(partition_sizes):
     rounds = math.ceil(size / THREADS_PER_PARTITION)
-    print(f"    Partition {i}: {size} files → {rounds} rounds × ~25s ≈ {rounds * 25}s (estimated)")
+    print(f"    Partition {i}: {size} files → {rounds} rounds * ~25s ≈ {rounds * 25}s (estimated)")
 
 record("ThreadPool multi-file path exercised",
        any(s > 1 for s in partition_sizes),

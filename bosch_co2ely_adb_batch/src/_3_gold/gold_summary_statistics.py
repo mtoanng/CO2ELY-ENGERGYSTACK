@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import avg, col, max as spark_max, min as spark_min, count
 
-from _common.common_utils import (
+from _5_common.common_utils import (
     build_table_name,
     configure_logger,
     env_variables,
@@ -26,7 +26,7 @@ from _common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _common.io_utils import write_to_delta
+from _5_common.io_utils import write_to_delta
 
 logger = configure_logger("gold_summary_statistics")
 

@@ -3,10 +3,10 @@
 Usage:
     pytest src/_9_tests/ -v
     pytest src/_9_tests/unit/ -v --no-header
-    pytest src/_9_tests/unit/test_converter_common.py -v
+    pytest src/_9_tests/unit/test_converter_5_common.py -v
 
 Path setup:
-    Fixtures handle sys.path insertion for _common, _0_convert, _2_enrich.
+    Fixtures handle sys.path insertion for _5_common, _0_convert, _2_enrich.
     Individual test files do NOT need sys.path manipulation.
 """
 
@@ -24,7 +24,7 @@ import pytest
 # Path setup (ensures imports work regardless of where pytest is invoked)
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent  # src/
-sys.path.insert(0, str(_REPO_ROOT / "_common"))
+sys.path.insert(0, str(_REPO_ROOT / "_5_common"))
 sys.path.insert(0, str(_REPO_ROOT / "_0_convert"))
 sys.path.insert(0, str(_REPO_ROOT / "_2_enrich"))
 

@@ -60,7 +60,7 @@ CO-ESTACK-ADB/                          ← Git repo root
         ├── _3_gold/
         │   ├── gold_summary_statistics.py
         │   └── gold_timeseries_view.py
-        └── _common/
+        └── _5_common/
             ├── common_utils.py
             └── io_utils.py
 ```

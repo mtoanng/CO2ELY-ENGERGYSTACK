@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import polars as pl
 from pyspark.sql import SparkSession
 
-from _common.common_utils import (
+from _5_common.common_utils import (
     build_table_name,
     configure_logger,
     env_variables,
@@ -26,7 +26,7 @@ from _common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _common.io_utils import polars_to_spark, write_to_delta
+from _5_common.io_utils import polars_to_spark, write_to_delta
 
 logger = configure_logger("enrich_timeseries")
 
@@ -84,7 +84,7 @@ def enrich_dataframe(pl_df: pl.DataFrame, active_area: float) -> pl.DataFrame:
             (pl.col("Current") * 1000.0 / active_area).alias("Current density")
         )
 
-    logger.info(f"Enrichment applied: {pl_df.shape[0]} rows × {pl_df.shape[1]} cols")
+    logger.info(f"Enrichment applied: {pl_df.shape[0]} rows * {pl_df.shape[1]} cols")
     return pl_df
 
 

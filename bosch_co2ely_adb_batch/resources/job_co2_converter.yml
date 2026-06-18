@@ -4,7 +4,6 @@
 
 # --- Base cluster config (dev: single-node) ---
 # Single-node mode for dev/integration testing.
-# spark.task.cpus=2 matches production config for consistency.
 _converter_cluster_base: &converter_cluster_base
   policy_id: ${var.static_job_cluster_policy_id}
   spark_version: ${var.spark_version}
@@ -28,14 +27,8 @@ _converter_cluster_base: &converter_cluster_base
     product_department_team: "ELY"
     project: "CO_energystack"
 
-# --- Scaled cluster for production (multi-worker) ---
+# --- Scaled cluster ---
 # Autoscale: Spark scheduler adds workers as pending tasks grow.
-# spark.task.cpus=4 → 4 slots per E16 worker (16 cores / 4).
-# Each task runs ThreadPoolExecutor(4) → 4 concurrent file parses.
-# Per worker: 4 slots × 4 threads = 16 concurrent files.
-# Benchmark-validated (32 files, D16): 4T×4thr = 151s (fastest).
-# Fewer tasks = better HTTP connection reuse in BlobServiceClient pool.
-# Partition strategy: fill slots first (1 file per partition when possible).
 _converter_cluster_scaled: &converter_cluster_scaled
   policy_id: ${var.scaled_job_cluster_policy_id}
   spark_version: ${var.spark_version}
@@ -81,13 +74,13 @@ _converter_libs_xlsx: &converter_libs_xlsx
   - pypi:
       package: "azure-identity>=1.15"
 
-_converter_libs_csv: &converter_libs_csv
-  - pypi:
-      package: "polars>=1.0"
-  - pypi:
-      package: "azure-storage-blob>=12.19"
-  - pypi:
-      package: "azure-identity>=1.15"
+# _converter_libs_csv: &converter_libs_csv
+#   - pypi:
+#       package: "polars>=1.0"
+#   - pypi:
+#       package: "azure-storage-blob>=12.19"
+#   - pypi:
+#       package: "azure-identity>=1.15"
 
 # =============================================================================
 # COMPOSED JOB SETTINGS

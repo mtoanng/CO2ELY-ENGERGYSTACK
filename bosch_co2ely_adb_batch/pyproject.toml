@@ -36,7 +36,7 @@ known-first-party = ["common", "xlsx_converter", "csv_converter"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/_9_tests"]
-pythonpath = ["src/_0_convert", "src/_common"]
+pythonpath = ["src/_0_convert", "src/_5_common"]
 
 [tool.mypy]
 python_version = "3.11"

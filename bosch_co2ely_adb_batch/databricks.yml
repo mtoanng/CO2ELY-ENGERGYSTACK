@@ -1,12 +1,10 @@
 # Databricks Asset Bundle definition for co_energystack_pipeline.
-# CO₂ Electrolysis measurement data pipeline (XLSX/CSV → Parquet → Delta).
+# CO₂ Electrolysis measurement data pipeline.
 #
 # Auth: cluster identity via run_as SP (sp-co2ely-energystack).
-# SP has Storage Blob Data Contributor on stpsbdodxdev2datalake.
 # Environment: auto-detected from workspace URL in Python code.
-# No credentials in YAML or job parameters.
 #
-# Repo: CO-ESTACK-ADB/co_energystack_pipeline/
+# Repo: CO2ELY-ENERGYSTACK/bosch_co2ely_adb_batch/
 # See https://docs.databricks.com/dev-tools/bundles/index.html
 
 bundle:
@@ -51,7 +49,7 @@ variables:
     description: Driver node type for autoscaled pipeline jobs
     default: "Standard_D16as_v4"
   static_node_type:
-    description: Node type for static single-node jobs (converter)
+    description: Node type for static single-node jobs
     default: "Standard_D16as_v4"
 
   # --- Per-layer task parameters ---

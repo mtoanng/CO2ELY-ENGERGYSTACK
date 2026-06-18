@@ -7,5 +7,5 @@ Medallion architecture:
     _1_ingest  : UC Volume (.xlsx) → Bronze Delta tables (Polars/calamine read)
     _2_enrich  : Bronze → Silver (Polars enrichment: EE, CD, FE, flows, SPCE)
     _3_gold    : Silver → Gold (dashboard-ready views + summary KPIs)
-    _common    : Shared utilities (env detection, logging, Delta I/O)
+    _5_common    : Shared utilities (env detection, logging, Delta I/O)
 """

@@ -26,7 +26,7 @@ Reliability:
     are skipped (avoids infinite retry of corrupt files)
 
 Deduplication:
-  - Spark repartition guarantees each Row in exactly ONE partition (hash-based)
+  - Spark repartition guarantees each Row in exactly ONE partition
   - xlsx/csv tasks filter by extension → no overlap
   - Tracking table MERGE on blob_path → idempotent updates
 
@@ -34,7 +34,7 @@ Scalability (two-level parallelism):
   Level 1 (inter-node): Spark distributes partitions across workers
   Level 2 (intra-node): ThreadPoolExecutor within each partition
   spark.task.cpus=4 → 4 slots per E16 worker → 16 concurrent files max
-  Benchmark: 4T×4thr fastest (fewer SDK pools = better HTTP reuse)
+  Benchmark: 4T*4thr fastest (fewer SDK pools = better HTTP reuse)
   Partition strategy: fill all task slots first, then batch remaining
 """
 import os
@@ -71,17 +71,11 @@ from common import build_abfss_path
 # =============================================================================
 
 # Threads per partition (concurrent files within a single Spark task)
-# Each task processes its files using a ThreadPoolExecutor with this many workers.
-# Polars/calamine release GIL → real parallelism across threads.
-# Benchmark-validated: 4T×4thr (4 tasks, 4 threads each) is optimal.
-# Fewer tasks = better HTTP connection reuse within BlobServiceClient pool.
 THREADS_PER_PARTITION = 4
 
-# Cluster topology (used to calculate optimal partition count)
-# Priority: fill all task slots first → 1 file per partition when possible
-# Only batch multiple files per partition when num_files > total_slots
+# Cluster topology
 CORES_PER_WORKER = 16   # Standard_E16as_v4
-MAX_WORKERS = 2         # autoscale max
+MAX_WORKERS = 3         # autoscale max
 
 # Retry config for transient errors
 MAX_RETRIES = 3

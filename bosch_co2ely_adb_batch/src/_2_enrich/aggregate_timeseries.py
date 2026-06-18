@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import polars as pl
 from pyspark.sql import SparkSession
 
-from _common.common_utils import (
+from _5_common.common_utils import (
     build_table_name,
     configure_logger,
     env_variables,
@@ -25,7 +25,7 @@ from _common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _common.io_utils import polars_to_spark, write_to_delta
+from _5_common.io_utils import polars_to_spark, write_to_delta
 
 logger = configure_logger("aggregate_timeseries")
 
@@ -124,7 +124,7 @@ def main():
 
     # Aggregate
     pl_agg = aggregate_timeseries(pl_df, interval_seconds=DEFAULT_INTERVAL_SECONDS)
-    logger.info(f"Aggregated: {pl_agg.shape[0]} bins × {pl_agg.shape[1]} cols")
+    logger.info(f"Aggregated: {pl_agg.shape[0]} bins * {pl_agg.shape[1]} cols")
 
     # Write to Delta
     df_agg = polars_to_spark(spark, pl_agg)

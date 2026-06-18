@@ -127,7 +127,7 @@ def convert(
         ts_rows, ts_buffer = generic_unpivot_chunked(
             df, file_uuid, group, columns, CHUNK_ROWS
         )
-        logger.info(f"    Chunked CSV unpivot: {n_rows} rows × {n_channels} cols = "
+        logger.info(f"    Chunked CSV unpivot: {n_rows} rows * {n_channels} cols = "
                     f"{ts_rows:,} ts rows")
 
         return [ConversionResult(

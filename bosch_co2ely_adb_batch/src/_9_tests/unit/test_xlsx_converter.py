@@ -27,7 +27,7 @@ except ImportError:
 
 
 # =============================================================================
-# XLSX PARSING (end-to-end through convert())
+# XLSX PARSING
 # =============================================================================
 
 @pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")

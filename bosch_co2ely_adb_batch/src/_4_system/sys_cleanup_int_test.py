@@ -5,7 +5,7 @@ Operator uses output to manually clean via SQL editor.
 
 Usage:
     spark_python_task:
-        python_file: ../src/_0_system/sys_cleanup_int_test.py
+        python_file: ../src/_4_system/sys_cleanup_int_test.py
         parameters: ["--env", "dev"]
 """
 import sys

@@ -20,7 +20,7 @@ import polars as pl
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp, input_file_name, lit
 
-from _common.common_utils import (
+from _5_common.common_utils import (
     build_table_name,
     configure_logger,
     env_variables,
@@ -28,7 +28,7 @@ from _common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _common.io_utils import write_to_delta
+from _5_common.io_utils import write_to_delta
 
 logger = configure_logger("ingest_excel_to_bronze")
 
@@ -89,7 +89,6 @@ def ingest_volume_excels(spark: SparkSession, volume_path: str) -> "pyspark.sql.
     combined = pl.concat(frames, how="diagonal_relaxed")
 
     # Convert Polars → Pandas → Spark
-    # (Polars Arrow export → createDataFrame is the fastest path)
     df_spark = spark.createDataFrame(combined.to_pandas())
     return df_spark
 

@@ -63,7 +63,7 @@ ENVIRONMENT_CONFIG = {
         "storage_account": "stpsbdodxqadatalake",
         "container": "co2elyd-data",
         "unity_catalog": "ps_xplatform_qa",
-        "unity_schema": "co2elyd_qa",
+        "unity_schema": "co2ely",
     },
     "adb-5407587042408609.9.azuredatabricks.net": {
         "environment": "prod",
@@ -150,7 +150,7 @@ def build_abfss_path(storage_account: str, container: str, blob_path: str) -> st
 
 
 # =============================================================================
-# AZURE SDK CLIENT FACTORY (worker-safe)
+# AZURE SDK CLIENT FACTORY
 # =============================================================================
 
 def get_blob_service_client(storage_account: str = None):
@@ -205,7 +205,7 @@ def generate_file_uuid(relative_path: str) -> str:
 
 
 # =============================================================================
-# SCHEMAS (4 output tables)
+# SCHEMAS
 # =============================================================================
 
 SCHEMAS = {
@@ -334,10 +334,10 @@ def detect_units_row(row_values: List[str]) -> bool:
 
 
 # =============================================================================
-# BLOB LISTING (Azure SDK — parallel HTTP, no JVM)
+# BLOB LISTING
 # =============================================================================
 
-SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+SUPPORTED_EXTENSIONS = {".xlsx", ".xls"}
 
 
 def list_source_blobs(storage_account: str, container: str, source_prefix: str) -> List[BlobInfo]:
@@ -382,7 +382,7 @@ def list_source_blobs(storage_account: str, container: str, source_prefix: str) 
 
 
 # =============================================================================
-# GENERIC UNPIVOT (Polars native .unpivot)
+# GENERIC UNPIVOT
 # =============================================================================
 
 def generic_unpivot(
@@ -444,12 +444,12 @@ def generic_unpivot(
 
 
 # =============================================================================
-# CHUNKED UNPIVOT (bounded memory for large sheets)
+# CHUNKED UNPIVOT
 # =============================================================================
 
 # Chunk processing constants
-CHUNK_ROWS = 10_000  # rows per chunk during unpivot (controls peak RAM)
-TIMESERIES_CHUNK_THRESHOLD = 50_000  # total timeseries rows (n_rows × n_cols) before chunking kicks in
+CHUNK_ROWS = 50_000  # rows per chunk during unpivot (controls peak RAM)
+TIMESERIES_CHUNK_THRESHOLD = 1_000_000  # total timeseries rows (n_rows * n_cols) before chunking kicks in
 
 
 def generic_unpivot_chunked(
@@ -463,19 +463,15 @@ def generic_unpivot_chunked(
 
     Instead of materializing the entire long-format table in RAM, processes
     the data in row-wise chunks and writes each chunk as a Parquet row group
-    into an in-memory BytesIO buffer. No disk I/O — avoids network-attached
-    storage latency on 'as' VMs.
-
-    Peak memory = chunk_rows × n_columns × ~80 bytes + final compressed Parquet
-    buffer (~53 MB per sheet, compressed with Zstd).
+    into an in-memory BytesIO buffer.
 
     Args:
         df: Polars DataFrame with data rows (columns named by channel identifiers).
         file_uuid: Deterministic UUID for this file (join key).
-        group: Group identifier (sheet name for xlsx, "data" for csv).
+        group: Group identifier (sheet name for xlsx).
         columns: List of column names to unpivot.
         chunk_rows: Number of source rows per chunk (default: CHUNK_ROWS).
-            Each chunk produces chunk_rows × len(columns) timeseries rows.
+            Each chunk produces chunk_rows * len(columns) timeseries rows.
 
     Returns:
         Tuple of (total_ts_rows: int, buffer: io.BytesIO) where buffer contains
@@ -491,7 +487,7 @@ def generic_unpivot_chunked(
             length = min(chunk_rows, n_rows - start)
             chunk = df.slice(start, length)
 
-            # Add row index with absolute offset (not relative to chunk)
+            # Add row index with absolute offset
             chunk_indexed = chunk.select(columns).with_row_index(
                 "sample_offset", offset=start
             )
@@ -621,14 +617,14 @@ def build_statistics(
 
 
 # =============================================================================
-# PARQUET WRITER (Azure SDK upload — parallel HTTP PUT, zero JVM)
+# PARQUET WRITER
 # =============================================================================
 
 class ParquetWriter:
     """Writes Arrow tables as Parquet to ADLS via Azure SDK.
 
     Creates one Parquet file per table_type per group (e.g. timeseries/filename_sheetname.parquet).
-    Uses Zstd compression for optimal size/speed trade-off.
+    Uses Zstd compression for optimal parquet size.
     """
 
     def __init__(self, storage_account: str, container: str, output_prefix: str,
@@ -638,7 +634,7 @@ class ParquetWriter:
         Args:
             storage_account: ADLS Gen2 storage account name.
             container: Blob container name.
-            output_prefix: Base blob path for output (e.g. "parquet_raw").
+            output_prefix: Base blob path for output.
             compression: Parquet compression codec (default: "zstd").
             compression_level: Compression level (default: 3).
         """
@@ -672,7 +668,6 @@ class ParquetWriter:
         Returns:
             Dict mapping table_type to relative blob path (e.g.
             {"timeseries": "timeseries/filename_sheetname_timeseries.parquet"}).
-            Only includes table_types with > 0 rows (except filemeta/statistics which are always written).
         """
         output_paths = {}
         group_suffix = f"_{sanitize_name(result.group_name)}" if result.group_name else ""
@@ -717,7 +712,7 @@ class ParquetWriter:
 
 
 # =============================================================================
-# INCREMENTAL TRACKER (watermark + Azure SDK listing + retry tracking)
+# INCREMENTAL TRACKER
 # =============================================================================
 
 class IncrementalTracker:
@@ -737,10 +732,6 @@ class IncrementalTracker:
     Deduplication:
     - MERGE ON blob_path guarantees exactly-once tracking per file
     - Even if same file is submitted twice in the same batch, MERGE deduplicates
-
-    Bronze integration:
-    - Bronze ingest queries this same tracking table (status='SUCCESS')
-    - Only ingests Parquet files listed in output_paths of successful conversions
     """
 
     def __init__(self, tracking_table: str, spark_session):
@@ -784,7 +775,7 @@ class IncrementalTracker:
 
         Returns:
             datetime of the most recent successfully processed file's last_modified,
-            or None if no SUCCESS records exist (first run).
+            or None if no SUCCESS records exist.
         """
         try:
             row = self.spark.sql(
@@ -810,8 +801,7 @@ class IncrementalTracker:
             source_prefix: Blob path prefix to scan (e.g. "raw_data").
 
         Returns:
-            List[BlobInfo] of blobs that need processing (new or modified
-            since last successful run).
+            List[BlobInfo] of blobs that need processing.
         """
         watermark = self._get_watermark()
         if watermark:

@@ -1,4 +1,4 @@
-"""Unit tests for _common/common_config.py.
+"""Unit tests for _5_common/common_config.py.
 
 Tests environment resolution, medallion layer config, table name building,
 and backward-compat wrappers. No Spark cluster needed (uses mock SparkSession).
