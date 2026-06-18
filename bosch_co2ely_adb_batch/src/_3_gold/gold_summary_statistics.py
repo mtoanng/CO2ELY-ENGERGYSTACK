@@ -26,7 +26,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.io_utils import write_to_delta
+from _5_common.common_io_utils import write_to_delta
 
 logger = configure_logger("gold_summary_statistics")
 

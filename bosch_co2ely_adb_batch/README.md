@@ -62,7 +62,7 @@ CO-ESTACK-ADB/                          ← Git repo root
         │   └── gold_timeseries_view.py
         └── _5_common/
             ├── common_utils.py
-            └── io_utils.py
+            └── common_io_utils.py
 ```
 
 ## Quick Start

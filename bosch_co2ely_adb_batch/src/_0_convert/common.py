@@ -781,7 +781,7 @@ class IncrementalTracker:
             row = self.spark.sql(
                 f"SELECT MAX(last_modified) AS wm FROM {self.table} WHERE status='SUCCESS'"
             ).collect()[0]
-            return row.wm
+            return row.wm.replace(tzinfo=timezone.utc) if row.wm else None
         except Exception:
             return None
 
