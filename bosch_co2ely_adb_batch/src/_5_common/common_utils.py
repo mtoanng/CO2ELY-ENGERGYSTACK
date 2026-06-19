@@ -1,30 +1,39 @@
 """Shared utilities for the CO2 energystack pipeline.
 
-THIS IS A BACKWARD-COMPATIBILITY SHIM. All config is canonical in common_config.py.
-Downstream layers (_2_enrich, _3_gold) import from here for historical reasons.
-New code should import directly from common_config and common_spark_utils.
+New code should import directly from the canonical modules:
 
-Re-exports from common_config:
-    env_variables, medallion_variables, layer_variables, build_table_name
-
-Re-exports from common_spark_utils:
-    configure_logger, get_job_args, build_abfss_path
+    common_config.py        -> env_variables, medallion_variables, layer_variables, build_table_name
+    common_system_utils.py  -> configure_logger, get_job_args
+    common_io_utils.py      -> build_abfss_path, build_external_table_location, write_to_delta
 """
 
 # Re-export config functions (canonical source: common_config.py)
-from _5_common.common_config import (
-    env_variables,
-    medallion_variables,
-    layer_variables,
-    build_table_name,
-)
+try:
+    from _5_common.common_config import (
+        env_variables,
+        medallion_variables,
+        layer_variables,
+        build_table_name,
+    )
+except ImportError:
+    from .common_config import (
+        env_variables,
+        medallion_variables,
+        layer_variables,
+        build_table_name,
+    )
 
-# Re-export generic utilities (canonical source: common_spark_utils.py)
-from _5_common.common_spark_utils import (
-    configure_logger,
-    get_job_args,
-    build_abfss_path,
-)
+# Re-export system utilities (canonical source: common_system_utils.py)
+try:
+    from _5_common.common_system_utils import configure_logger, get_job_args
+except ImportError:
+    from .common_system_utils import configure_logger, get_job_args
+
+# Re-export ADLS/IO utilities (canonical source: common_io_utils.py)
+try:
+    from _5_common.common_io_utils import build_abfss_path, build_external_table_location
+except ImportError:
+    from .common_io_utils import build_abfss_path, build_external_table_location
 
 __all__ = [
     "env_variables",
@@ -34,4 +43,5 @@ __all__ = [
     "configure_logger",
     "get_job_args",
     "build_abfss_path",
+    "build_external_table_location",
 ]

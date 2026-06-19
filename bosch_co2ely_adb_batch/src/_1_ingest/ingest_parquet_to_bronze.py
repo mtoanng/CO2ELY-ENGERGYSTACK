@@ -46,6 +46,7 @@ from common_config import (
     env_variables, medallion_variables, layer_variables,
     build_table_name, CONVERTER_CONFIG, TABLE_TYPES, logger,
 )
+from common_io_utils import build_external_table_location
 
 
 # =============================================================================
@@ -130,13 +131,23 @@ def main():
             .withColumns({"_bronze_ingested_at": current_timestamp()})
         )
 
+        # Build external table location (bronze layer)
+        location = build_external_table_location(
+            storage_account=storage_account,
+            container=container,
+            layer="bronze",
+            table_name=table_type,
+        )
+
         # Write with Trigger.AvailableNow (process all new files, then stop)
+        # Auto Loader creates external table when path option is provided
         query = (
             stream_df.writeStream
             .format("delta")
             .outputMode("append")
             .option("checkpointLocation", checkpoint_path)
             .option("mergeSchema", "true")
+            .option("path", location)  # External table location
             .trigger(availableNow=True)
             .toTable(bronze_table)
         )

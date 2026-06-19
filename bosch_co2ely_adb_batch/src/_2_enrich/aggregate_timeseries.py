@@ -25,7 +25,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.common_io_utils import polars_to_spark, write_to_delta
+from _5_common.common_io_utils import polars_to_spark, write_to_delta, build_external_table_location
 
 logger = configure_logger("aggregate_timeseries")
 
@@ -126,9 +126,16 @@ def main():
     pl_agg = aggregate_timeseries(pl_df, interval_seconds=DEFAULT_INTERVAL_SECONDS)
     logger.info(f"Aggregated: {pl_agg.shape[0]} bins * {pl_agg.shape[1]} cols")
 
-    # Write to Delta
+    # Write to Delta (external table)
     df_agg = polars_to_spark(spark, pl_agg)
-    write_to_delta(df_agg, target_table, mode="overwrite")
+    
+    location = build_external_table_location(
+        storage_account=env["storage_account"],
+        container=write_medal["adls_container"],
+        layer=write_medal["table_prefix"],  # "silver"
+        table_name="aggregated",
+    )
+    write_to_delta(df_agg, target_table, mode="overwrite", location=location)
     logger.info(f"Successfully wrote aggregated data to {target_table}")
 
 

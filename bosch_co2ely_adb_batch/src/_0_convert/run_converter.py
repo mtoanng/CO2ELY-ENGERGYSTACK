@@ -201,7 +201,7 @@ def _process_single_file(
             blob = container_client.get_blob_client(blob_path)
             file_bytes = blob.download_blob(max_concurrency=4).readall()
 
-            # --- PARSE (Polars + calamine — Rust, releases GIL) ---
+            # --- PARSE (Polars + calamine) ---
             # Full abfss:// path for filemeta.file_path (downstream traceability)
             abfss_path = build_abfss_path(row.storage_account, row.container, blob_path)
 

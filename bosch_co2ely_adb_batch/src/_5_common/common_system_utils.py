@@ -1,22 +1,15 @@
-"""Generic Spark utilities for the CO2 ELY pipeline.
+"""System utilities for the CO2 ELY pipeline.
 
-This module contains ONLY Spark-native helpers with ZERO heavy dependencies
-(no polars, no pyarrow, no azure-sdk). Safe to import from ANY job layer.
+Logging configuration and CLI argument parsing.
 
 Functions:
-    build_abfss_path   - Build abfss:// URI from components
-    configure_logger   - Structured logger for pipeline tasks
-    get_job_args       - Standard --env / --is_integration_test arg parsing
-
-For Delta writes, use Spark's native API directly:
-    df.write.format("delta").mode("append").saveAsTable(table_name)
+    configure_logger  - Structured logger for pipeline tasks
+    get_job_args      - Standard --env / --is_integration_test arg parsing
 """
 
 import sys
 import logging
 import argparse
-
-from pyspark.sql import SparkSession
 
 
 # =============================================================================
@@ -62,21 +55,3 @@ def get_job_args() -> argparse.Namespace:
     args, _ = parser.parse_known_args()
     args.is_integration_test = args.is_integration_test.lower() == "true"
     return args
-
-
-# =============================================================================
-# ADLS PATH BUILDER
-# =============================================================================
-
-def build_abfss_path(storage_account: str, container: str, path: str) -> str:
-    """Build abfss:// URI for ADLS access via UC External Location.
-
-    Args:
-        storage_account: e.g. "stpsbdodxdev2datalake"
-        container: e.g. "co2elyd-data"
-        path: blob path within container
-
-    Returns:
-        Full abfss:// URI.
-    """
-    return f"abfss://{container}@{storage_account}.dfs.core.windows.net/{path}"

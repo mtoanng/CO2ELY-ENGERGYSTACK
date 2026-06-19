@@ -24,7 +24,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.common_io_utils import write_to_delta
+from _5_common.common_io_utils import write_to_delta, build_external_table_location
 
 logger = configure_logger("gold_timeseries_view")
 
@@ -87,8 +87,14 @@ def main():
     df_view = df.select(available_cols)
     row_count = df_view.count()
 
-    # Write gold table
-    write_to_delta(df_view, target_table)
+    # Write gold table (external)
+    location = build_external_table_location(
+        storage_account=env["storage_account"],
+        container=write_medal["adls_container"],
+        layer=write_medal["table_prefix"],  # "gold"
+        table_name="timeseries_view",
+    )
+    write_to_delta(df_view, target_table, location=location)
     logger.info(f"Gold table written: {target_table} ({row_count} rows)")
 
 

@@ -26,7 +26,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.common_io_utils import polars_to_spark, write_to_delta
+from _5_common.common_io_utils import polars_to_spark, write_to_delta, build_external_table_location
 
 logger = configure_logger("enrich_timeseries")
 
@@ -133,9 +133,16 @@ def main():
     # Apply enrichment
     pl_df = enrich_dataframe(pl_df, active_area=ACTIVE_AREA)
 
-    # Convert back to Spark and write
+    # Convert back to Spark and write to external table
     df_enriched = polars_to_spark(spark, pl_df)
-    write_to_delta(df_enriched, target_table, mode="overwrite")
+    
+    location = build_external_table_location(
+        storage_account=env["storage_account"],
+        container=write_medal["adls_container"],
+        layer=write_medal["table_prefix"],  # "silver"
+        table_name="enriched",
+    )
+    write_to_delta(df_enriched, target_table, mode="overwrite", location=location)
     logger.info(f"Successfully wrote enriched data to {target_table}")
 
 
