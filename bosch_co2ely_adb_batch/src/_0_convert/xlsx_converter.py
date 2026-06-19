@@ -35,7 +35,7 @@ from common import (
 )
 
 # Sheet-level parallelism DISABLED when file-level threading is active.
-MAX_SHEET_THREADS = 1
+MAX_SHEET_THREADS = 2
 
 # Pattern for detecting "Real time" merged header (case-insensitive)
 _REALTIME_PATTERN = re.compile(r"^real\s*time$", re.IGNORECASE)

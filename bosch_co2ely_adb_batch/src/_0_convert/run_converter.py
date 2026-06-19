@@ -27,7 +27,7 @@ Reliability:
 
 Deduplication:
   - Spark repartition guarantees each Row in exactly ONE partition
-  - xlsx/csv tasks filter by extension → no overlap
+  - xlsx tasks filter by extension → no overlap
   - Tracking table MERGE on blob_path → idempotent updates
 
 Scalability (two-level parallelism):
@@ -157,7 +157,6 @@ def _process_single_file(
     container_client,
     writer,
     convert_xlsx,
-    convert_csv,
     generate_file_uuid,
     sanitize_name,
     logger,
@@ -175,7 +174,6 @@ def _process_single_file(
         container_client: Azure ContainerClient (shared, thread-safe).
         writer: ParquetWriter instance for uploading output Parquet files.
         convert_xlsx: xlsx_converter.convert function reference.
-        convert_csv: csv_converter.convert function reference.
         generate_file_uuid: common.generate_file_uuid function reference.
         sanitize_name: common.sanitize_name function reference.
         logger: Logger instance for structured output.
@@ -207,8 +205,8 @@ def _process_single_file(
 
             if extension in (".xlsx", ".xls"):
                 results = convert_xlsx(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
-            elif extension == ".csv":
-                results = convert_csv(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
+            # elif extension == ".csv":
+            #     results = convert_csv(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
             else:
                 raise ValueError(f"Unsupported extension: {extension}")
 
@@ -306,7 +304,6 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         build_abfss_path, ParquetWriter, logger,
     )
     from xlsx_converter import convert as convert_xlsx
-    from csv_converter import convert as convert_csv
 
     # Get ADLS config from first row (all rows in partition have same config)
     first_row = rows_list[0]
@@ -329,7 +326,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         # Single file — no thread overhead
         yield _process_single_file(
             rows_list[0], container_client, writer,
-            convert_xlsx, convert_csv, generate_file_uuid, sanitize_name, logger,
+            convert_xlsx, generate_file_uuid, sanitize_name, logger,
         )
     else:
         # Multiple files — use ThreadPoolExecutor
@@ -338,7 +335,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
                 executor.submit(
                     _process_single_file,
                     row, container_client, writer,
-                    convert_xlsx, convert_csv, generate_file_uuid, sanitize_name, logger,
+                    convert_xlsx, generate_file_uuid, sanitize_name, logger,
                 ): row
                 for row in rows_list
             }
@@ -363,7 +360,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="ELY Converter (Azure SDK + mapPartitions)")
     parser.add_argument("--is_integration_test", type=str, default="false")
     parser.add_argument("--env", type=str, default="dev_user")
-    parser.add_argument("--extensions", type=str, default=".xlsx,.xls,.csv",
+    parser.add_argument("--extensions", type=str, default=".xlsx,.xls",
                         help="Comma-separated extensions to process")
     parser.add_argument("--threads_per_partition", type=int, default=THREADS_PER_PARTITION,
                         help="Threads per partition (concurrent files)")
@@ -492,7 +489,7 @@ def main():
 
     # Distribute source modules for worker imports (uses _SRC_DIR computed at top)
     src_dir = Path(_SRC_DIR)
-    for module_file in ["common.py", "xlsx_converter.py", "csv_converter.py"]:
+    for module_file in ["common.py", "xlsx_converter.py"]:
         module_path = str(src_dir / module_file)
         spark.sparkContext.addPyFile(module_path)
 

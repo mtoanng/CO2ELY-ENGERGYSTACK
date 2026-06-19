@@ -120,7 +120,7 @@ class TestAutoLoaderConfig:
     """Validate Auto Loader configuration choices."""
 
     def test_cloud_files_format_is_parquet(self):
-        """Auto Loader reads Parquet (not CSV/JSON)."""
+        """Auto Loader reads Parquet."""
         # This is a design validation test
         expected_format = "parquet"
         assert expected_format == "parquet"

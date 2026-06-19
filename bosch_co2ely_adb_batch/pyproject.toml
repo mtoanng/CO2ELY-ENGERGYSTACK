@@ -32,7 +32,7 @@ select = ["E", "F", "W", "I", "N", "UP"]
 ignore = ["E501"]  # line length handled by formatter
 
 [tool.ruff.lint.isort]
-known-first-party = ["common", "xlsx_converter", "csv_converter"]
+known-first-party = ["common", "xlsx_converter"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/_9_tests"]

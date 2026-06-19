@@ -47,7 +47,7 @@ class TestGenerateFileUuid:
         assert uuid1 != uuid2
 
     def test_uuid_format(self):
-        result = generate_file_uuid("any/path.csv")
+        result = generate_file_uuid("any/path.xlsx")
         assert len(result) == 36
         assert result.count("-") == 4
 
