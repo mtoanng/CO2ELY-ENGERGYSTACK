@@ -39,8 +39,9 @@ MAX_SHEET_THREADS = 1
 
 # Pattern for detecting "Real time" merged header (case-insensitive)
 _REALTIME_PATTERN = re.compile(r"^real\s*time$", re.IGNORECASE)
-# Excel epoch date that indicates a time-only value
+# Excel epoch date that calamine produces when converting time-only serial fractions
 _EXCEL_EPOCH_DATE = "1899-12-31"
+# Zero time that calamine appends to date-only serial numbers
 _ZERO_TIME = "00:00:00"
 
 
@@ -53,12 +54,16 @@ def _merge_datetime_columns(
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
     """Detect and merge split date+time columns from merged 'Real time' header.
 
-    Excel merged cells create 2 columns:
-      - Column 1 ("Real time"): date values like "2024-06-15 00:00:00"
-      - Column 2 ("unnamed"/"Real time_1"): time values like "1899-12-31 14:30:00"
+    Excel stores dates as serial numbers and times as day-fractions internally.
+    When a merged header spans 2 columns (one date, one time), calamine converts:
+      - Date serial (e.g. 46031 for "2/14/2026") -> "2026-02-14 00:00:00"
+      - Time fraction (e.g. 0.41768 for "10:01:27 AM") -> "1899-12-31 10:01:27"
 
-    This function combines them into a single "timestamp" column with proper
-    datetime strings like "2024-06-15 14:30:00".
+    The "1899-12-31" prefix and "00:00:00" suffix are calamine artifacts from
+    interpreting Excel's internal numeric representation, NOT actual data.
+
+    This function combines them into a single "timestamp" column:
+      "2026-02-14 00:00:00" + "1899-12-31 10:01:27" -> "2026-02-14 10:01:27"
 
     Channel metadata:
       - channel (row1) = "timestamp"
@@ -95,14 +100,16 @@ def _merge_datetime_columns(
             next_ch.startswith("real time") or next_ch == ""):
         return df, columns, row1_channel, row2_channel_name, units
 
-    # Peek at first few non-null values to confirm date+time pattern
+    # Peek at first few non-null values to confirm calamine date/time pattern
     sample_date = df[date_col].drop_nulls().head(5).to_list()
     sample_time = df[time_col].drop_nulls().head(5).to_list()
 
     if not sample_date or not sample_time:
         return df, columns, row1_channel, row2_channel_name, units
 
-    # Confirm pattern: date col has "00:00:00" or no time, time col has "1899-12-31"
+    # Confirm calamine pattern:
+    #   date col: "2026-02-14 00:00:00" (serial -> datetime with zero time)
+    #   time col: "1899-12-31 10:01:27" (fraction -> datetime with epoch date)
     date_str = str(sample_date[0])
     time_str = str(sample_time[0])
 
@@ -111,31 +118,30 @@ def _merge_datetime_columns(
 
     if not (has_date_pattern or has_time_pattern):
         # Neither pattern detected — don't merge
-        logger.info(f"    'Real time' columns found but no date/time split pattern detected")
+        logger.info(f"    'Real time' columns found but no calamine date/time split pattern detected")
         return df, columns, row1_channel, row2_channel_name, units
 
     logger.info(f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp'")
+    logger.info(f"    Sample: date='{date_str}', time='{time_str}'")
 
     # Combine: extract date part from col1 + time part from col2
-    # Handle various formats:
-    #   date: "2024-06-15 00:00:00" -> "2024-06-15"
-    #   date: "2024-06-15" -> "2024-06-15"
-    #   time: "1899-12-31 14:30:00" -> "14:30:00"
-    #   time: "14:30:00" -> "14:30:00"
+    # Calamine output formats:
+    #   date: "2026-02-14 00:00:00" -> slice first 10 chars -> "2026-02-14"
+    #   time: "1899-12-31 10:01:27" -> slice from char 11  -> "10:01:27"
     df = df.with_columns(
         (
-            # Extract date part (first 10 chars or before space)
+            # Extract date part (first 10 chars = YYYY-MM-DD)
             pl.col(date_col).cast(pl.String).str.slice(0, 10)
             + " "
             + pl.when(
                 pl.col(time_col).cast(pl.String).str.contains(_EXCEL_EPOCH_DATE)
             )
             .then(
-                # Strip "1899-12-31 " prefix (11 chars) to get time
+                # Strip "1899-12-31 " prefix (11 chars) to get HH:MM:SS
                 pl.col(time_col).cast(pl.String).str.slice(11)
             )
             .otherwise(
-                # Already a time string, use as-is
+                # Already a time string (no epoch prefix), use as-is
                 pl.col(time_col).cast(pl.String)
             )
         ).alias("timestamp")
@@ -252,7 +258,7 @@ def _process_sheet(
     df = df.rename(rename_map)
     columns = list(rename_map.values())
 
-    # --- Merge split "Real time" date+time columns (merged cell edge case) ---
+    # --- Merge split "Real time" date+time columns (calamine edge case) ---
     df, columns, row1_channel, row2_channel_name, units = _merge_datetime_columns(
         df, columns, row1_channel, row2_channel_name, units
     )
