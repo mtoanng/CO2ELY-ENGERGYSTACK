@@ -14,7 +14,7 @@ from unittest.mock import patch
 from common import (
     SCHEMAS, TABLE_TYPES, ConversionResult,
     build_filemeta, build_channel, build_statistics,
-    detect_units_row, generic_unpivot, generic_unpivot_chunked,
+    detect_units_row, unpivot_timeseries,
     TIMESERIES_CHUNK_THRESHOLD,
 )
 

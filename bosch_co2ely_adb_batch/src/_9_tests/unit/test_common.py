@@ -19,8 +19,7 @@ from common import (
     build_filemeta,
     build_channel,
     build_statistics,
-    generic_unpivot,
-    generic_unpivot_chunked,
+    unpivot_timeseries,
     SCHEMAS,
     TABLE_TYPES,
     CHUNK_ROWS,
@@ -238,34 +237,34 @@ class TestBuildStatistics:
 # GENERIC UNPIVOT (standard, in-memory)
 # =============================================================================
 
-class TestGenericUnpivot:
-    """Wide->long melt via Polars .unpivot()."""
+class TestUnpivotTimeseries:
+    """Wide->long melt via unpivot_timeseries()."""
 
     def test_basic_unpivot(self):
         import polars as pl
         df = pl.DataFrame({"ch1": [1.0, 2.0], "ch2": [3.0, 4.0]})
-        result = generic_unpivot(df, "uuid-1", "Sheet1")
+        result = unpivot_timeseries(df, "uuid-1", "Sheet1")
         assert result.num_rows == 4  # 2 rows x 2 columns
         assert result.schema == SCHEMAS["timeseries"]
 
     def test_uuid_and_group_populated(self):
         import polars as pl
         df = pl.DataFrame({"x": [1.0]})
-        result = generic_unpivot(df, "my-uuid", "my-group")
+        result = unpivot_timeseries(df, "my-uuid", "my-group")
         assert result.column("uuid")[0].as_py() == "my-uuid"
         assert result.column("group")[0].as_py() == "my-group"
 
     def test_sample_offset_correct(self):
         import polars as pl
         df = pl.DataFrame({"ch1": [10.0, 20.0, 30.0]})
-        result = generic_unpivot(df, "u", "g")
+        result = unpivot_timeseries(df, "u", "g")
         offsets = result.column("sample_offset").to_pylist()
         assert offsets == [0, 1, 2]
 
     def test_non_numeric_goes_to_value_str(self):
         import polars as pl
         df = pl.DataFrame({"ch1": ["text_value", "123.4"]})
-        result = generic_unpivot(df, "u", "g")
+        result = unpivot_timeseries(df, "u", "g")
         values = result.column("value").to_pylist()
         value_strs = result.column("value_str").to_pylist()
         # "text_value" -> value=None, value_str="text_value"
@@ -278,46 +277,38 @@ class TestGenericUnpivot:
     def test_subset_columns(self):
         import polars as pl
         df = pl.DataFrame({"ch1": [1.0], "ch2": [2.0], "ch3": [3.0]})
-        result = generic_unpivot(df, "u", "g", columns=["ch1", "ch3"])
+        result = unpivot_timeseries(df, "u", "g", columns=["ch1", "ch3"])
         assert result.num_rows == 2  # only 2 channels
 
-
-# =============================================================================
-# CHUNKED UNPIVOT (bounded memory)
-# =============================================================================
-
-class TestGenericUnpivotChunked:
-    """Chunked wide->long unpivot with BytesIO output."""
-
-    def test_basic_chunked_output(self):
+    def test_chunked_basic_output(self):
         import polars as pl
         df = pl.DataFrame({"ch1": list(range(100)), "ch2": list(range(100, 200))})
-        total_rows, buf = generic_unpivot_chunked(df, "u", "g", ["ch1", "ch2"], chunk_rows=50)
+        total_rows, buf = unpivot_timeseries(df, "u", "g", chunk_rows=50)
         assert total_rows == 200  # 100 rows x 2 cols
         assert isinstance(buf, io.BytesIO)
 
-    def test_parquet_readable(self):
+    def test_chunked_parquet_readable(self):
         import polars as pl
         df = pl.DataFrame({"ch1": [1.0, 2.0, 3.0]})
-        total_rows, buf = generic_unpivot_chunked(df, "u", "g", ["ch1"], chunk_rows=2)
+        total_rows, buf = unpivot_timeseries(df, "u", "g", chunk_rows=2)
         table = pq.read_table(buf)
         assert table.num_rows == total_rows
         assert table.schema == SCHEMAS["timeseries"]
 
-    def test_multiple_row_groups(self):
+    def test_chunked_multiple_row_groups(self):
         import polars as pl
         # 10 rows, chunk_rows=3 -> 4 chunks (3+3+3+1)
         df = pl.DataFrame({"ch1": list(range(10))})
-        total_rows, buf = generic_unpivot_chunked(df, "u", "g", ["ch1"], chunk_rows=3)
+        total_rows, buf = unpivot_timeseries(df, "u", "g", chunk_rows=3)
         pf = pq.ParquetFile(buf)
         assert pf.metadata.num_row_groups >= 3
         assert total_rows == 10
 
-    def test_sample_offset_absolute(self):
+    def test_chunked_sample_offset_absolute(self):
         """Offsets are absolute (not reset per chunk)."""
         import polars as pl
         df = pl.DataFrame({"ch1": list(range(5))})
-        _, buf = generic_unpivot_chunked(df, "u", "g", ["ch1"], chunk_rows=2)
+        _, buf = unpivot_timeseries(df, "u", "g", chunk_rows=2)
         table = pq.read_table(buf)
         offsets = table.column("sample_offset").to_pylist()
         assert offsets == [0, 1, 2, 3, 4]

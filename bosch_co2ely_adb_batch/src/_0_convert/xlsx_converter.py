@@ -27,7 +27,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from common import (
-    SCHEMAS, ConversionResult, generic_unpivot, generic_unpivot_chunked,
+    SCHEMAS, ConversionResult, unpivot_timeseries,
     generate_file_uuid, build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,
     CHUNK_ROWS, TIMESERIES_CHUNK_THRESHOLD,
@@ -138,8 +138,8 @@ def _process_sheet(
 
     if total_timeseries_cells > TIMESERIES_CHUNK_THRESHOLD:
         # Write timeseries to BytesIO buffer.
-        ts_rows, ts_buffer = generic_unpivot_chunked(
-            df, file_uuid, sheet_name, columns, CHUNK_ROWS
+        ts_rows, ts_buffer = unpivot_timeseries(
+            df, file_uuid, sheet_name, columns, chunk_rows=CHUNK_ROWS
         )
         logger.info(f"    Chunked unpivot: {n_rows} rows * {n_channels} cols = "
                     f"{ts_rows:,} ts rows, chunk_size={CHUNK_ROWS}")
@@ -152,7 +152,7 @@ def _process_sheet(
         )
     else:
         # Standard unpivot
-        timeseries = generic_unpivot(df, file_uuid, sheet_name, columns)
+        timeseries = unpivot_timeseries(df, file_uuid, sheet_name, columns)
         return ConversionResult(
             tables={"filemeta": filemeta, "channel": channel,
                     "timeseries": timeseries, "statistics": statistics},

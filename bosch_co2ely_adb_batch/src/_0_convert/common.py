@@ -382,69 +382,7 @@ def list_source_blobs(storage_account: str, container: str, source_prefix: str) 
 
 
 # =============================================================================
-# GENERIC UNPIVOT
-# =============================================================================
-
-def generic_unpivot(
-    df: pl.DataFrame,
-    file_uuid: str,
-    group: str,
-    columns: Optional[List[str]] = None,
-) -> pa.Table:
-    """Wide -> long melt using Polars .unpivot().
-
-    Converts a wide DataFrame (one column per channel) into a long-format
-    PyArrow table with columns: uuid, group, sample_offset, channel, value, value_str.
-
-    Args:
-        df: Polars DataFrame with data rows. Columns should be named by
-            channel identifiers (row 1 headers).
-        file_uuid: Deterministic UUID for this file (join key).
-        group: Group identifier (sheet name for xlsx, "data" for csv).
-        columns: List of column names to unpivot. If None, uses all columns.
-
-    Returns:
-        PyArrow Table cast to SCHEMAS["timeseries"] with columns:
-        uuid, group, sample_offset, channel, value (Float64), value_str (String).
-        Numeric values go in 'value', non-numeric strings go in 'value_str'.
-    """
-    if columns is None:
-        columns = df.columns
-
-    df_indexed = df.select(columns).with_row_index("sample_offset")
-
-    long_df = df_indexed.unpivot(
-        index=["sample_offset"],
-        on=columns,
-        variable_name="channel",
-        value_name="raw_value",
-    )
-
-    long_df = long_df.with_columns(
-        pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
-        pl.when(
-            pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).is_null()
-            & pl.col("raw_value").is_not_null()
-        )
-        .then(pl.col("raw_value").cast(pl.String))
-        .otherwise(None)
-        .alias("value_str"),
-    )
-
-    long_df = long_df.with_columns(
-        pl.lit(file_uuid).alias("uuid"),
-        pl.lit(group).alias("group"),
-    )
-
-    result = long_df.select(
-        ["uuid", "group", "sample_offset", "channel", "value", "value_str"]
-    )
-
-    return result.to_arrow().cast(SCHEMAS["timeseries"])
-
-
-# =============================================================================
-# CHUNKED UNPIVOT
+# UNPIVOT TIMESERIES
 # =============================================================================
 
 # Chunk processing constants
@@ -452,85 +390,118 @@ CHUNK_ROWS = 50_000  # rows per chunk during unpivot (controls peak RAM)
 TIMESERIES_CHUNK_THRESHOLD = 1_000_000  # total timeseries rows (n_rows * n_cols) before chunking kicks in
 
 
-def generic_unpivot_chunked(
+def unpivot_timeseries(
     df: pl.DataFrame,
     file_uuid: str,
     group: str,
-    columns: List[str],
-    chunk_rows: int = CHUNK_ROWS,
-) -> tuple:
-    """Chunked wide->long unpivot with bounded memory via BytesIO.
+    columns: Optional[List[str]] = None,
+    chunk_rows: Optional[int] = None,
+):
+    """Wide -> long melt using Polars .unpivot().
 
-    Instead of materializing the entire long-format table in RAM, processes
-    the data in row-wise chunks and writes each chunk as a Parquet row group
-    into an in-memory BytesIO buffer.
+    Converts a wide DataFrame (one column per channel) into long-format with
+    columns: uuid, group, sample_offset, channel, value, value_str.
 
     Args:
-        df: Polars DataFrame with data rows (columns named by channel identifiers).
+        df: Polars DataFrame with data rows. Columns named by channel identifiers.
         file_uuid: Deterministic UUID for this file (join key).
-        group: Group identifier (sheet name for xlsx).
-        columns: List of column names to unpivot.
-        chunk_rows: Number of source rows per chunk (default: CHUNK_ROWS).
-            Each chunk produces chunk_rows * len(columns) timeseries rows.
+        group: Group identifier (sheet name for xlsx, "data" for csv).
+        columns: List of column names to unpivot. If None, uses all columns.
+        chunk_rows: If provided, processes in row-wise chunks of this size and
+            writes each chunk as a Parquet row group into a BytesIO buffer.
+            Use this for large files to bound peak memory usage.
 
     Returns:
-        Tuple of (total_ts_rows: int, buffer: io.BytesIO) where buffer contains
-        the complete Parquet file with multiple row groups.
+        - If chunk_rows is None: pa.Table cast to SCHEMAS["timeseries"].
+        - If chunk_rows is set: tuple of (total_ts_rows: int, buffer: io.BytesIO)
+          where buffer contains a complete Parquet file with multiple row groups.
     """
-    n_rows = df.height
-    total_ts_rows = 0
-    buf = io.BytesIO()
-    writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+    if columns is None:
+        columns = df.columns
 
-    try:
-        for start in range(0, n_rows, chunk_rows):
-            length = min(chunk_rows, n_rows - start)
-            chunk = df.slice(start, length)
+    if chunk_rows is None:
+        # --- In-memory path ---
+        df_indexed = df.select(columns).with_row_index("sample_offset")
 
-            # Add row index with absolute offset
-            chunk_indexed = chunk.select(columns).with_row_index(
-                "sample_offset", offset=start
+        long_df = df_indexed.unpivot(
+            index=["sample_offset"],
+            on=columns,
+            variable_name="channel",
+            value_name="raw_value",
+        )
+
+        long_df = long_df.with_columns(
+            pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
+            pl.when(
+                pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).is_null()
+                & pl.col("raw_value").is_not_null()
             )
+            .then(pl.col("raw_value").cast(pl.String))
+            .otherwise(None)
+            .alias("value_str"),
+            pl.lit(file_uuid).alias("uuid"),
+            pl.lit(group).alias("group"),
+        )
 
-            long_chunk = chunk_indexed.unpivot(
-                index=["sample_offset"],
-                on=columns,
-                variable_name="channel",
-                value_name="raw_value",
-            )
+        return (
+            long_df
+            .select(["uuid", "group", "sample_offset", "channel", "value", "value_str"])
+            .to_arrow()
+            .cast(SCHEMAS["timeseries"])
+        )
 
-            long_chunk = long_chunk.with_columns(
-                pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
-                pl.when(
-                    pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).is_null()
-                    & pl.col("raw_value").is_not_null()
+    else:
+        # --- Chunked path: bounded memory via BytesIO ---
+        n_rows = df.height
+        total_ts_rows = 0
+        buf = io.BytesIO()
+        writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+
+        try:
+            for start in range(0, n_rows, chunk_rows):
+                length = min(chunk_rows, n_rows - start)
+                chunk = df.slice(start, length)
+
+                chunk_indexed = chunk.select(columns).with_row_index(
+                    "sample_offset", offset=start
                 )
-                .then(pl.col("raw_value").cast(pl.String))
-                .otherwise(None)
-                .alias("value_str"),
-            )
 
-            long_chunk = long_chunk.with_columns(
-                pl.lit(file_uuid).alias("uuid"),
-                pl.lit(group).alias("group"),
-            )
+                long_chunk = chunk_indexed.unpivot(
+                    index=["sample_offset"],
+                    on=columns,
+                    variable_name="channel",
+                    value_name="raw_value",
+                )
 
-            result_chunk = long_chunk.select(
-                ["uuid", "group", "sample_offset", "channel", "value", "value_str"]
-            )
+                long_chunk = long_chunk.with_columns(
+                    pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).alias("value"),
+                    pl.when(
+                        pl.col("raw_value").cast(pl.String).cast(pl.Float64, strict=False).is_null()
+                        & pl.col("raw_value").is_not_null()
+                    )
+                    .then(pl.col("raw_value").cast(pl.String))
+                    .otherwise(None)
+                    .alias("value_str"),
+                    pl.lit(file_uuid).alias("uuid"),
+                    pl.lit(group).alias("group"),
+                )
 
-            arrow_chunk = result_chunk.to_arrow().cast(SCHEMAS["timeseries"])
-            writer.write_table(arrow_chunk)
-            total_ts_rows += arrow_chunk.num_rows
+                arrow_chunk = (
+                    long_chunk
+                    .select(["uuid", "group", "sample_offset", "channel", "value", "value_str"])
+                    .to_arrow()
+                    .cast(SCHEMAS["timeseries"])
+                )
+                writer.write_table(arrow_chunk)
+                total_ts_rows += arrow_chunk.num_rows
 
-            # Explicitly free chunk memory before next iteration
-            del chunk, chunk_indexed, long_chunk, result_chunk, arrow_chunk
+                del chunk, chunk_indexed, long_chunk, arrow_chunk
 
-    finally:
-        writer.close()
+        finally:
+            writer.close()
 
-    buf.seek(0)
-    return total_ts_rows, buf
+        buf.seek(0)
+        return total_ts_rows, buf
 
 
 # =============================================================================
