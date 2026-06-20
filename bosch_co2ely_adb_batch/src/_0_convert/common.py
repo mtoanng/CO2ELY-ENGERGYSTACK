@@ -344,7 +344,7 @@ def list_source_blobs(storage_account: str, container: str, source_prefix: str) 
     """List source blobs via Azure SDK (ContainerClient.list_blobs).
 
     Scans all blobs under source_prefix/ and returns metadata for supported
-    file types (.csv, .xlsx, .xls).
+    file types (.xlsx, .xls).
 
     Args:
         storage_account: ADLS Gen2 storage account name.
@@ -405,7 +405,7 @@ def unpivot_timeseries(
     Args:
         df: Polars DataFrame with data rows. Columns named by channel identifiers.
         file_uuid: Deterministic UUID for this file (join key).
-        group: Group identifier (sheet name for xlsx, "data" for csv).
+        group: Group identifier (sheet name for xlsx).
         columns: List of column names to unpivot. If None, uses all columns.
         chunk_rows: If provided, processes in row-wise chunks of this size and
             writes each chunk as a Parquet row group into a BytesIO buffer.

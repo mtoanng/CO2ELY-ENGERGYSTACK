@@ -18,7 +18,7 @@
     "output": "parquet_raw"
   },
   "table_types": ["filemeta", "channel", "timeseries", "statistics"],
-  "supported_extensions": [".csv", ".xlsx", ".xls"],
+  "supported_extensions": [".xlsx", ".xls"],
   "optimization": {
     "schedule": "weekly",
     "vacuum_retention_hours": 168

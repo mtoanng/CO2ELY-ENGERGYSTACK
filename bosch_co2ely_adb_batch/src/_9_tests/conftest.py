@@ -104,29 +104,6 @@ def sample_xlsx_bytes():
 
 
 @pytest.fixture
-def sample_csv_bytes():
-    """Minimal valid CSV file bytes for testing converters.
-
-    Format:
-        Row 1: channel identifiers (header)
-        Row 2: channel display names
-        Row 3: units (V, A, degC)
-        Rows 4+: data
-    """
-    csv_content = (
-        "time_s,voltage,current,temp\n"
-        "Elapsed Time,Stack Voltage,Cell Current,Temperature\n"
-        "s,V,A,degC\n"
-        "0.0,3.1,10.0,25.0\n"
-        "1.0,3.2,10.5,25.1\n"
-        "2.0,3.3,11.0,25.3\n"
-        "3.0,3.4,10.8,25.2\n"
-        "4.0,3.5,10.2,25.0\n"
-    )
-    return csv_content.encode("utf-8")
-
-
-@pytest.fixture
 def sample_blob_info():
     """Sample BlobInfo object for testing tracker/listing."""
     from common import BlobInfo

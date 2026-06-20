@@ -20,7 +20,7 @@ from common import (
 
 # Try importing the converter (may need specific deps)
 try:
-    from xlsx_converter import convert
+    from xlsx_converter import convert, _merge_datetime_columns
     HAS_XLSX_CONVERTER = True
 except ImportError:
     HAS_XLSX_CONVERTER = False
@@ -189,3 +189,285 @@ class TestXlsxErrors:
         corrupt = b"PK\x03\x04" + b"\x00" * 100
         with pytest.raises(Exception):
             convert(corrupt, "corrupt.xlsx", 104, None, abfss_file_path="abfss://c@s/p")
+
+
+# =============================================================================
+# MERGE DATETIME COLUMNS ("Real time" edge case)
+# =============================================================================
+
+@pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")
+class TestMergeDatetimeColumns:
+    """Tests for _merge_datetime_columns() — merged 'Real time' header fix.
+
+    Calamine converts Excel serial numbers:
+      - Date serial (e.g. 46031) -> "2026-02-14 00:00:00"
+      - Time fraction (e.g. 0.41768) -> "1899-12-31 10:01:27"
+
+    The function merges these into a single "timestamp" column.
+    """
+
+    def test_basic_merge(self):
+        """Standard case: 'Real time' date col + unnamed time col -> 'timestamp'."""
+        df = pl.DataFrame({
+            "Real time": ["2026-02-14 00:00:00", "2026-02-15 00:00:00", "2026-02-16 00:00:00"],
+            "unnamed": ["1899-12-31 10:01:27", "1899-12-31 11:30:00", "1899-12-31 14:45:59"],
+            "Voltage": ["3.1", "3.2", "3.3"],
+        })
+        columns = ["Real time", "unnamed", "Voltage"]
+        row1_channel = ["Real time", "unnamed", "Voltage"]
+        row2_channel_name = ["Real time", "Column_1", "Stack Voltage"]
+        units = ["", "", "V"]
+
+        result_df, result_cols, result_row1, result_row2, result_units = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Should produce 2 columns: timestamp + Voltage
+        assert result_cols == ["timestamp", "Voltage"]
+        assert result_row1 == ["timestamp", "Voltage"]
+        # channel_name preserves original first column header
+        assert result_row2 == ["Real time", "Stack Voltage"]
+        assert result_units == ["", "V"]
+
+        # Check merged values
+        ts_values = result_df["timestamp"].to_list()
+        assert ts_values[0] == "2026-02-14 10:01:27"
+        assert ts_values[1] == "2026-02-15 11:30:00"
+        assert ts_values[2] == "2026-02-16 14:45:59"
+
+    def test_preserves_channel_name_from_original_header(self):
+        """channel_name should be the row2 value of the original date column."""
+        df = pl.DataFrame({
+            "Real time": ["2026-01-01 00:00:00"],
+            "unnamed": ["1899-12-31 08:00:00"],
+        })
+        columns = ["Real time", "unnamed"]
+        row1_channel = ["Real time", "unnamed"]
+        row2_channel_name = ["Measurement Time", "Column_1"]
+        units = ["", ""]
+
+        _, _, result_row1, result_row2, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_row1 == ["timestamp"]
+        assert result_row2 == ["Measurement Time"]
+
+    def test_no_merge_without_realtime_header(self):
+        """Should NOT merge if no 'Real time' column exists."""
+        df = pl.DataFrame({
+            "Time": ["2026-02-14 00:00:00"],
+            "unnamed": ["1899-12-31 10:00:00"],
+            "Voltage": ["3.1"],
+        })
+        columns = ["Time", "unnamed", "Voltage"]
+        row1_channel = ["Time", "unnamed", "Voltage"]
+        row2_channel_name = ["Time", "Column_1", "Voltage"]
+        units = ["s", "", "V"]
+
+        result_df, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Unchanged — no merge
+        assert result_cols == ["Time", "unnamed", "Voltage"]
+        assert list(result_df.columns) == ["Time", "unnamed", "Voltage"]
+
+    def test_no_merge_next_col_not_unnamed(self):
+        """Should NOT merge if the column after 'Real time' is a named channel."""
+        df = pl.DataFrame({
+            "Real time": ["2026-02-14 00:00:00"],
+            "Voltage": ["3.1"],
+        })
+        columns = ["Real time", "Voltage"]
+        row1_channel = ["Real time", "Voltage"]
+        row2_channel_name = ["Real time", "Stack Voltage"]
+        units = ["", "V"]
+
+        _, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Unchanged — next column is "Voltage", not unnamed/duplicate
+        assert result_cols == ["Real time", "Voltage"]
+
+    def test_no_merge_no_calamine_pattern(self):
+        """Should NOT merge if data doesn't show calamine date/time artifacts."""
+        df = pl.DataFrame({
+            "Real time": ["some text", "other text"],
+            "unnamed": ["more text", "data here"],
+            "Voltage": ["3.1", "3.2"],
+        })
+        columns = ["Real time", "unnamed", "Voltage"]
+        row1_channel = ["Real time", "unnamed", "Voltage"]
+        row2_channel_name = ["Real time", "Column_1", "Voltage"]
+        units = ["", "", "V"]
+
+        _, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Unchanged — no date/time pattern detected
+        assert result_cols == ["Real time", "unnamed", "Voltage"]
+
+    def test_merge_with_realtime_1_duplicate(self):
+        """Should merge when second col is 'Real time_1' (uniqueness suffix)."""
+        df = pl.DataFrame({
+            "Real time": ["2026-03-01 00:00:00", "2026-03-02 00:00:00"],
+            "Real time_1": ["1899-12-31 09:15:00", "1899-12-31 16:30:00"],
+            "Current": ["10.5", "11.0"],
+        })
+        columns = ["Real time", "Real time_1", "Current"]
+        row1_channel = ["Real time", "Real time_1", "Current"]
+        row2_channel_name = ["Real time", "Column_1", "Cell Current"]
+        units = ["", "", "A"]
+
+        result_df, result_cols, result_row1, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_cols == ["timestamp", "Current"]
+        assert result_row1 == ["timestamp", "Current"]
+        assert result_df["timestamp"].to_list() == ["2026-03-01 09:15:00", "2026-03-02 16:30:00"]
+
+    def test_merge_case_insensitive(self):
+        """'REAL TIME' and 'real time' should both trigger merge."""
+        df = pl.DataFrame({
+            "REAL TIME": ["2026-01-10 00:00:00"],
+            "unnamed": ["1899-12-31 12:00:00"],
+        })
+        columns = ["REAL TIME", "unnamed"]
+        # After uniqueness logic in _process_sheet, the channel identifier
+        # would be "REAL TIME" (preserving case from row1)
+        row1_channel = ["REAL TIME", "unnamed"]
+        row2_channel_name = ["Real Time", "Column_1"]
+        units = ["", ""]
+
+        _, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_cols == ["timestamp", ]  # only timestamp remains
+
+    def test_merge_preserves_column_order(self):
+        """Timestamp should appear at the same position as the original date col."""
+        df = pl.DataFrame({
+            "Voltage": ["3.1", "3.2"],
+            "Real time": ["2026-02-14 00:00:00", "2026-02-15 00:00:00"],
+            "unnamed": ["1899-12-31 10:00:00", "1899-12-31 11:00:00"],
+            "Current": ["10.0", "10.5"],
+        })
+        columns = ["Voltage", "Real time", "unnamed", "Current"]
+        row1_channel = ["Voltage", "Real time", "unnamed", "Current"]
+        row2_channel_name = ["Voltage", "Real time", "Column_2", "Current"]
+        units = ["V", "", "", "A"]
+
+        result_df, result_cols, _, _, result_units = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # timestamp replaces "Real time" at index 1
+        assert result_cols == ["Voltage", "timestamp", "Current"]
+        assert result_units == ["V", "", "A"]
+        assert list(result_df.columns) == ["Voltage", "timestamp", "Current"]
+
+    def test_merge_handles_date_only_10_chars(self):
+        """Date column with just 'YYYY-MM-DD' (10 chars, no time suffix)."""
+        df = pl.DataFrame({
+            "Real time": ["2026-02-14", "2026-02-15"],
+            "unnamed": ["1899-12-31 10:01:27", "1899-12-31 11:30:00"],
+        })
+        columns = ["Real time", "unnamed"]
+        row1_channel = ["Real time", "unnamed"]
+        row2_channel_name = ["Real time", "Column_1"]
+        units = ["", ""]
+
+        result_df, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_cols == ["timestamp"]
+        ts_values = result_df["timestamp"].to_list()
+        assert ts_values[0] == "2026-02-14 10:01:27"
+        assert ts_values[1] == "2026-02-15 11:30:00"
+
+    def test_merge_handles_time_without_epoch(self):
+        """Time column without '1899-12-31' prefix (already clean time string)."""
+        df = pl.DataFrame({
+            "Real time": ["2026-02-14 00:00:00", "2026-02-15 00:00:00"],
+            "unnamed": ["10:01:27", "11:30:00"],
+        })
+        columns = ["Real time", "unnamed"]
+        row1_channel = ["Real time", "unnamed"]
+        row2_channel_name = ["Real time", "Column_1"]
+        units = ["", ""]
+
+        result_df, _, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Should still merge (date pattern detected)
+        ts_values = result_df["timestamp"].to_list()
+        assert ts_values[0] == "2026-02-14 10:01:27"
+        assert ts_values[1] == "2026-02-15 11:30:00"
+
+    def test_no_merge_realtime_is_last_column(self):
+        """Should NOT merge if 'Real time' is the last column (no partner)."""
+        df = pl.DataFrame({
+            "Voltage": ["3.1"],
+            "Real time": ["2026-02-14 00:00:00"],
+        })
+        columns = ["Voltage", "Real time"]
+        row1_channel = ["Voltage", "Real time"]
+        row2_channel_name = ["Voltage", "Real time"]
+        units = ["V", ""]
+
+        _, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Unchanged — no column after "Real time"
+        assert result_cols == ["Voltage", "Real time"]
+
+    def test_merge_with_null_values(self):
+        """Null values in date/time columns should produce null timestamps."""
+        df = pl.DataFrame({
+            "Real time": ["2026-02-14 00:00:00", None, "2026-02-16 00:00:00"],
+            "unnamed": ["1899-12-31 10:00:00", "1899-12-31 11:00:00", None],
+            "Voltage": ["3.1", "3.2", "3.3"],
+        })
+        columns = ["Real time", "unnamed", "Voltage"]
+        row1_channel = ["Real time", "unnamed", "Voltage"]
+        row2_channel_name = ["Real time", "Column_1", "Voltage"]
+        units = ["", "", "V"]
+
+        result_df, result_cols, _, _, _ = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        # Should still merge (first sample value matches pattern)
+        assert result_cols == ["timestamp", "Voltage"]
+        ts_values = result_df["timestamp"].to_list()
+        assert ts_values[0] == "2026-02-14 10:00:00"
+
+    def test_merge_all_null_pair(self):
+        """All-null date/time pairs should still collapse into a timestamp column."""
+        df = pl.DataFrame({
+            "Real time": [None, None],
+            "unnamed": [None, None],
+            "Voltage": ["3.1", "3.2"],
+        })
+        columns = ["Real time", "unnamed", "Voltage"]
+        row1_channel = ["Real time", "unnamed", "Voltage"]
+        row2_channel_name = ["Real time", "Column_1", "Voltage"]
+        units = ["", "", "V"]
+
+        result_df, result_cols, result_row1, result_row2, result_units = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_cols == ["timestamp", "Voltage"]
+        assert result_row1 == ["timestamp", "Voltage"]
+        assert result_row2 == ["Real time", "Voltage"]
+        assert result_units == ["", "V"]
+        assert result_df["timestamp"].to_list() == [None, None]

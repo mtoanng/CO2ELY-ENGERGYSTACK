@@ -15,14 +15,15 @@ Parallelism: Sheets are processed in parallel via ThreadPoolExecutor.
 
 Memory safety:
 - Large sheets (n_rows * n_cols > TIMESERIES_CHUNK_THRESHOLD) use chunked unpivot:
-  process CHUNK_ROWS at a time → write Parquet row groups to temp file.
+  process CHUNK_ROWS at a time -> write Parquet row groups to temp file.
   Peak memory bounded to chunk_size * n_cols * ~80 bytes regardless of file size.
 - Sheet threads capped at MAX_SHEET_THREADS to prevent thread explosion.
 """
 import io
+import re
 import polars as pl
 import pyarrow as pa
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -34,7 +35,145 @@ from common import (
 )
 
 # Sheet-level parallelism DISABLED when file-level threading is active.
-MAX_SHEET_THREADS = 1
+MAX_SHEET_THREADS = 2
+
+# Pattern for detecting "Real time" merged header (case-insensitive)
+_REALTIME_PATTERN = re.compile(r"^real\s*time$", re.IGNORECASE)
+# Excel epoch date that calamine produces when converting time-only serial fractions
+_EXCEL_EPOCH_DATE = "1899-12-31"
+# Zero time that calamine appends to date-only serial numbers
+_ZERO_TIME = "00:00:00"
+
+
+def _merge_datetime_columns(
+    df: pl.DataFrame,
+    columns: List[str],
+    row1_channel: List[str],
+    row2_channel_name: List[str],
+    units: List[str],
+) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
+    """Detect and merge split date+time columns from merged 'Real time' header.
+
+    Excel stores dates as serial numbers and times as day-fractions internally.
+    When a merged header spans 2 columns (one date, one time), calamine converts:
+      - Date serial (e.g. 46031 for "2/14/2026") -> "2026-02-14 00:00:00"
+      - Time fraction (e.g. 0.41768 for "10:01:27 AM") -> "1899-12-31 10:01:27"
+
+    The "1899-12-31" prefix and "00:00:00" suffix are calamine artifacts from
+    interpreting Excel's internal numeric representation, NOT actual data.
+
+    This function combines them into a single "timestamp" column:
+      "2026-02-14 00:00:00" + "1899-12-31 10:01:27" -> "2026-02-14 10:01:27"
+
+    Channel metadata:
+      - channel (row1) = "timestamp"
+      - channel_name (row2) = preserved from the original first column header
+
+    Args:
+        df: DataFrame with string columns (post-rename, pre-unpivot).
+        columns: List of column names (from rename_map).
+        row1_channel: Channel identifiers for build_channel().
+        row2_channel_name: Display names for build_channel().
+        units: Unit strings for build_channel().
+
+    Returns:
+        Tuple of (modified_df, columns, row1_channel, row2_channel_name, units)
+        with the time column removed and date column replaced by timestamp.
+        Returns inputs unchanged if no merge pattern detected.
+    """
+    # Find "Real time" column index
+    rt_idx = None
+    for i, ch in enumerate(row2_channel_name):
+        if _REALTIME_PATTERN.match(ch):
+            rt_idx = i
+            break
+
+    if rt_idx is None or rt_idx + 1 >= len(columns):
+        return df, columns, row1_channel, row2_channel_name, units
+
+    date_col = columns[rt_idx]
+    time_col = columns[rt_idx + 1]
+
+    # Verify the next column is the split partner (unnamed or duplicate)
+    next_ch = row2_channel_name[rt_idx + 1]
+    # if not (next_ch.startswith("unnamed") or next_ch.startswith("Real time") or
+    #         next_ch.startswith("real time") or next_ch == ""):
+    #     return df, columns, row1_channel, row2_channel_name, units
+
+    # Peek at first few non-null values to confirm calamine date/time pattern.
+    # If both columns are entirely null, still merge structurally so downstream
+    # logic sees a canonical timestamp column instead of a split date/time pair.
+    sample_date = df[date_col].drop_nulls().head(5).to_list()
+    sample_time = df[time_col].drop_nulls().head(5).to_list()
+
+    date_str = str(sample_date[0]) if sample_date else None
+    time_str = str(sample_time[0]) if sample_time else None
+
+    if date_str is None and time_str is None:
+        logger.info(
+            f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp' (all-null pair)"
+        )
+    else:
+        # Confirm calamine pattern:
+        #   date col: "2026-02-14 00:00:00" (serial -> datetime with zero time)
+        #   time col: "1899-12-31 10:01:27" (fraction -> datetime with epoch date)
+        has_date_pattern = bool(date_str) and (_ZERO_TIME in date_str or len(date_str) == 10)
+        has_time_pattern = bool(time_str) and (_EXCEL_EPOCH_DATE in time_str or "1899-12-30" in time_str)
+
+        if not (has_date_pattern or has_time_pattern):
+            # Neither pattern detected — don't merge
+            logger.info("    'Real time' columns found but no calamine date/time split pattern detected")
+            return df, columns, row1_channel, row2_channel_name, units
+
+        logger.info(f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp'")
+        logger.info(f"    Sample: date='{date_str}', time='{time_str}'")
+
+    # Combine: extract date part from col1 + time part from col2
+    # Calamine output formats:
+    #   date: "2026-02-14 00:00:00" -> slice first 10 chars -> "2026-02-14"
+    #   time: "1899-12-31 10:01:27" -> slice from char 11  -> "10:01:27"
+    df = df.with_columns(
+        (
+            # Extract date part (first 10 chars = YYYY-MM-DD)
+            pl.col(date_col).cast(pl.String).str.slice(0, 10)
+            + " "
+            + pl.when(
+                pl.col(time_col).cast(pl.String).str.contains(_EXCEL_EPOCH_DATE)
+            )
+            .then(
+                # Strip "1899-12-31 " prefix (11 chars) to get HH:MM:SS
+                pl.col(time_col).cast(pl.String).str.slice(11)
+            )
+            .otherwise(
+                # Already a time string (no epoch prefix), use as-is
+                pl.col(time_col).cast(pl.String)
+            )
+        ).alias("timestamp")
+    )
+
+    # Drop the original two columns, replace with "timestamp"
+    df = df.drop([date_col, time_col])
+
+    # Update metadata lists: remove time_col entry, rename date_col to "timestamp"
+    # Preserve original channel_name from the first column (row 2 header)
+    original_channel_name = row2_channel_name[rt_idx]
+
+    new_columns = [c for c in columns if c != date_col and c != time_col]
+    new_columns.insert(rt_idx, "timestamp")
+
+    new_row1 = [ch for i, ch in enumerate(row1_channel) if i != rt_idx and i != rt_idx + 1]
+    new_row1.insert(rt_idx, "timestamp")
+
+    new_row2 = [n for i, n in enumerate(row2_channel_name) if i != rt_idx and i != rt_idx + 1]
+    new_row2.insert(rt_idx, original_channel_name)
+
+    new_units = [u for i, u in enumerate(units) if i != rt_idx and i != rt_idx + 1]
+    new_units.insert(rt_idx, "")
+
+    # Reorder DataFrame columns to match new_columns
+    df = df.select(new_columns)
+
+    return df, new_columns, new_row1, new_row2, new_units
 
 
 def _process_sheet(
@@ -123,6 +262,11 @@ def _process_sheet(
     df = df.rename(rename_map)
     columns = list(rename_map.values())
 
+    # --- Merge split "Real time" date+time columns (calamine edge case) ---
+    df, columns, row1_channel, row2_channel_name, units = _merge_datetime_columns(
+        df, columns, row1_channel, row2_channel_name, units
+    )
+
     # NO Float64 pre-cast. Keep raw strings.
     n_rows = df.shape[0]
     n_channels = len(columns)
@@ -198,23 +342,23 @@ def convert(
     if len(sheet_names) <= 1:
         # Single sheet -> no threading overhead
         results = []
-        for sheet_name in sheet_names:
-            r = _process_sheet(file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified, abfss_file_path)
+        name = sheet_names[0] if sheet_names else None
+        if name:
+            r = _process_sheet(file_bytes, relative_path, file_uuid,
+                               file_size, name, last_modified, abfss_file_path)
             if r:
                 results.append(r)
         return results
 
-    # Multi-sheet -> parallel processing (Polars releases GIL)
-    # Cap threads to MAX_SHEET_THREADS to avoid thread explosion + memory pressure
-    n_threads = min(len(sheet_names), MAX_SHEET_THREADS)
-    logger.info(f"  {relative_path}: {len(sheet_names)} sheets -> parallel ({n_threads} threads)")
+    # Multi-sheet -> thread pool (capped at MAX_SHEET_THREADS)
     results = []
-    with ThreadPoolExecutor(max_workers=n_threads) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_SHEET_THREADS) as executor:
         futures = {
             executor.submit(
-                _process_sheet, file_bytes, relative_path, file_uuid, file_size, sheet_name, last_modified, abfss_file_path
-            ): sheet_name
-            for sheet_name in sheet_names
+                _process_sheet, file_bytes, relative_path, file_uuid,
+                file_size, name, last_modified, abfss_file_path
+            ): name
+            for name in sheet_names
         }
         for future in as_completed(futures):
             r = future.result()
