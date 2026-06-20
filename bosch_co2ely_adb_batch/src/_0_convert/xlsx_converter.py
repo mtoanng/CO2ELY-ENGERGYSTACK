@@ -83,7 +83,7 @@ def _merge_datetime_columns(
     """
     # Find "Real time" column index
     rt_idx = None
-    for i, ch in enumerate(row1_channel):
+    for i, ch in enumerate(row2_channel_name):
         if _REALTIME_PATTERN.match(ch):
             rt_idx = i
             break
@@ -95,34 +95,38 @@ def _merge_datetime_columns(
     time_col = columns[rt_idx + 1]
 
     # Verify the next column is the split partner (unnamed or duplicate)
-    next_ch = row1_channel[rt_idx + 1]
-    if not (next_ch.startswith("unnamed") or next_ch.startswith("Real time") or
-            next_ch.startswith("real time") or next_ch == ""):
-        return df, columns, row1_channel, row2_channel_name, units
+    next_ch = row2_channel_name[rt_idx + 1]
+    # if not (next_ch.startswith("unnamed") or next_ch.startswith("Real time") or
+    #         next_ch.startswith("real time") or next_ch == ""):
+    #     return df, columns, row1_channel, row2_channel_name, units
 
-    # Peek at first few non-null values to confirm calamine date/time pattern
+    # Peek at first few non-null values to confirm calamine date/time pattern.
+    # If both columns are entirely null, still merge structurally so downstream
+    # logic sees a canonical timestamp column instead of a split date/time pair.
     sample_date = df[date_col].drop_nulls().head(5).to_list()
     sample_time = df[time_col].drop_nulls().head(5).to_list()
 
-    if not sample_date or not sample_time:
-        return df, columns, row1_channel, row2_channel_name, units
+    date_str = str(sample_date[0]) if sample_date else None
+    time_str = str(sample_time[0]) if sample_time else None
 
-    # Confirm calamine pattern:
-    #   date col: "2026-02-14 00:00:00" (serial -> datetime with zero time)
-    #   time col: "1899-12-31 10:01:27" (fraction -> datetime with epoch date)
-    date_str = str(sample_date[0])
-    time_str = str(sample_time[0])
+    if date_str is None and time_str is None:
+        logger.info(
+            f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp' (all-null pair)"
+        )
+    else:
+        # Confirm calamine pattern:
+        #   date col: "2026-02-14 00:00:00" (serial -> datetime with zero time)
+        #   time col: "1899-12-31 10:01:27" (fraction -> datetime with epoch date)
+        has_date_pattern = bool(date_str) and (_ZERO_TIME in date_str or len(date_str) == 10)
+        has_time_pattern = bool(time_str) and (_EXCEL_EPOCH_DATE in time_str or "1899-12-30" in time_str)
 
-    has_date_pattern = (_ZERO_TIME in date_str or len(date_str) == 10)
-    has_time_pattern = (_EXCEL_EPOCH_DATE in time_str or "1899-12-30" in time_str)
+        if not (has_date_pattern or has_time_pattern):
+            # Neither pattern detected — don't merge
+            logger.info("    'Real time' columns found but no calamine date/time split pattern detected")
+            return df, columns, row1_channel, row2_channel_name, units
 
-    if not (has_date_pattern or has_time_pattern):
-        # Neither pattern detected — don't merge
-        logger.info(f"    'Real time' columns found but no calamine date/time split pattern detected")
-        return df, columns, row1_channel, row2_channel_name, units
-
-    logger.info(f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp'")
-    logger.info(f"    Sample: date='{date_str}', time='{time_str}'")
+        logger.info(f"    Merging split 'Real time' columns: '{date_col}' (date) + '{time_col}' (time) -> 'timestamp'")
+        logger.info(f"    Sample: date='{date_str}', time='{time_str}'")
 
     # Combine: extract date part from col1 + time part from col2
     # Calamine output formats:

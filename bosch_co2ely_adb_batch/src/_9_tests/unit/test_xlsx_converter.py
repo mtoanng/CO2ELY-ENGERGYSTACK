@@ -449,3 +449,25 @@ class TestMergeDatetimeColumns:
         assert result_cols == ["timestamp", "Voltage"]
         ts_values = result_df["timestamp"].to_list()
         assert ts_values[0] == "2026-02-14 10:00:00"
+
+    def test_merge_all_null_pair(self):
+        """All-null date/time pairs should still collapse into a timestamp column."""
+        df = pl.DataFrame({
+            "Real time": [None, None],
+            "unnamed": [None, None],
+            "Voltage": ["3.1", "3.2"],
+        })
+        columns = ["Real time", "unnamed", "Voltage"]
+        row1_channel = ["Real time", "unnamed", "Voltage"]
+        row2_channel_name = ["Real time", "Column_1", "Voltage"]
+        units = ["", "", "V"]
+
+        result_df, result_cols, result_row1, result_row2, result_units = _merge_datetime_columns(
+            df, columns, row1_channel, row2_channel_name, units
+        )
+
+        assert result_cols == ["timestamp", "Voltage"]
+        assert result_row1 == ["timestamp", "Voltage"]
+        assert result_row2 == ["Real time", "Voltage"]
+        assert result_units == ["", "V"]
+        assert result_df["timestamp"].to_list() == [None, None]
