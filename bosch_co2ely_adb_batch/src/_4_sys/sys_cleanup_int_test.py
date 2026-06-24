@@ -5,7 +5,7 @@ Operator uses output to manually clean via SQL editor.
 
 Usage:
     spark_python_task:
-        python_file: ../src/_4_system/sys_cleanup_int_test.py
+        python_file: ../src/_4_sys/sys_cleanup_int_test.py
         parameters: ["--env", "dev"]
 """
 import sys
@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_0_convert"))
 
 from pyspark.sql import SparkSession
-from common import get_env_variables, TABLE_TYPES, logger
+from converter_utils import get_env_variables, TABLE_TYPES, logger
 
 
 INT_TEST_TABLES = [

@@ -30,6 +30,8 @@ import io
 import json
 import uuid
 import logging
+import sys
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -37,6 +39,15 @@ import polars as pl
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+try:
+    _COMMON_DIR = Path(__file__).resolve().parent
+except NameError:
+    _COMMON_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+
+_SHARED_DIR = _COMMON_DIR.parent / "_5_common"
+if str(_SHARED_DIR) not in sys.path:
+    sys.path.insert(0, str(_SHARED_DIR))
 
 logger = logging.getLogger("ely_converter")
 logger.setLevel(logging.INFO)
@@ -46,92 +57,9 @@ if not logger.handlers:
     logger.addHandler(h)
 
 
-# =============================================================================
-# ENVIRONMENT CONFIG
-# =============================================================================
-
-ENVIRONMENT_CONFIG = {
-    "adb-1032635496032522.2.azuredatabricks.net": {
-        "environment": "dev",
-        "storage_account": "stpsbdodxdev2datalake",
-        "container": "co2elyd-data",
-        "unity_catalog": "ps_xplatform_dev",
-        "unity_schema": "co2elyd_dev",
-    },
-    "adb-7376334951991000.0.azuredatabricks.net": {
-        "environment": "qa",
-        "storage_account": "stpsbdodxqadatalake",
-        "container": "co2elyd-data",
-        "unity_catalog": "ps_xplatform_qa",
-        "unity_schema": "co2ely",
-    },
-    "adb-5407587042408609.9.azuredatabricks.net": {
-        "environment": "prod",
-        "storage_account": "stpsbdodxproddatalake",
-        "container": "co2elyd-data",
-        "unity_catalog": "ps_xplatform_prod",
-        "unity_schema": "co2elyd_prod",
-    },
-}
-
-CONVERTER_CONFIG = {
-    "schema": "converter",
-    "source_prefix": "test",
-    "output_prefix": "parquet_raw",
-    "tracking_table_name": "file_tracking",
-}
-
-
-def get_env_variables(spark) -> dict:
-    """Retrieve environment config based on workspace URL .
-
-    Args:
-        spark: Active SparkSession instance.
-
-    Returns:
-        dict with keys: environment, storage_account, container, unity_catalog.
-        Falls back to dev defaults if workspace URL is unrecognized.
-    """
-    try:
-        workspace_url = spark.conf.get("spark.databricks.workspaceUrl")
-    except Exception:
-        logger.warning("Workspace URL not found (local mode?)")
-        return {"environment": "local", "storage_account": None,
-                "container": None, "unity_catalog": None}
-
-    config = ENVIRONMENT_CONFIG.get(workspace_url)
-    if config is None:
-        logger.warning(f"Unrecognized workspace: {workspace_url}, using dev defaults")
-        return ENVIRONMENT_CONFIG["adb-1032635496032522.2.azuredatabricks.net"]
-
-    return config
-
-
 def get_unity_catalog_path(env_vars: dict) -> str:
     """Build fully qualified UC path: catalog.schema."""
     return f"{env_vars['unity_catalog']}.{env_vars['unity_schema']}"
-
-
-def get_adls_config(env_vars: dict) -> dict:
-    """Resolve ADLS blob paths for the current environment.
-
-    Args:
-        env_vars: Dict from get_env_variables() with storage_account,
-            container, and unity_catalog.
-
-    Returns:
-        dict with keys: storage_account, container, source_prefix,
-        output_prefix, tracking_table (fully qualified Delta table name).
-    """
-    catalog = env_vars["unity_catalog"]
-    schema = env_vars["unity_schema"]
-    return {
-        "storage_account": env_vars["storage_account"],
-        "container": env_vars["container"],
-        "source_prefix": CONVERTER_CONFIG["source_prefix"],
-        "output_prefix": CONVERTER_CONFIG["output_prefix"],
-        "tracking_table": f"{catalog}.{schema}.{CONVERTER_CONFIG['tracking_table_name']}",
-    }
 
 
 def build_abfss_path(storage_account: str, container: str, blob_path: str) -> str:
@@ -291,7 +219,7 @@ def sanitize_name(name: str) -> str:
         Cleaned string with special chars replaced by '_', spaces replaced,
         consecutive underscores collapsed, and leading/trailing '_' stripped.
     """
-    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = re.sub(r'[<>:"/\\|?*()\[\]]', "_", name)
     name = name.replace(" ", "_")
     return re.sub(r"_+", "_", name).strip("_")
 
@@ -796,7 +724,7 @@ class IncrementalTracker:
         # Cross-check candidates against tracking table (avoid re-processing SUCCESS files)
         processed = set()
         try:
-            paths_sql = ",".join(f"'{c.relative_path}'" for c in candidates)
+            paths_sql = ",".join(f"'{c.blob_path}'" for c in candidates)
             rows = self.spark.sql(
                 f"SELECT blob_path, file_size, last_modified FROM {self.table} "
                 f"WHERE status='SUCCESS' AND blob_path IN ({paths_sql})"
@@ -806,7 +734,7 @@ class IncrementalTracker:
             pass
 
         new_blobs = [b for b in candidates
-                     if (b.relative_path, b.file_size, b.last_modified) not in processed]
+                     if (b.blob_path, b.file_size, b.last_modified) not in processed]
         logger.info(f"New blobs to process: {len(new_blobs)}")
         return new_blobs
 

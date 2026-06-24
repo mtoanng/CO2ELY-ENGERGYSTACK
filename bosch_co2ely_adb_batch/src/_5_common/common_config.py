@@ -86,9 +86,9 @@ MEDALLION_VARIABLES = {
 
 LAYER_VARIABLES = {
     "_0_convert": {"read_layer": "raw", "write_layer": "raw"},
-    "_1_ingest": {"read_layer": "raw", "write_layer": "bronze"},
-    "_2_enrich": {"read_layer": "bronze", "write_layer": "silver"},
-    "_3_gold": {"read_layer": "silver", "write_layer": "gold"},
+    "_1_r2b": {"read_layer": "raw", "write_layer": "bronze"},
+    "_2_b2s": {"read_layer": "bronze", "write_layer": "silver"},
+    "_3_s2g": {"read_layer": "silver", "write_layer": "gold"},
 }
 
 
@@ -158,7 +158,7 @@ def layer_variables(step: str) -> dict:
     """Get read/write layer mapping for a pipeline step.
 
     Args:
-        step: Pipeline step name (e.g. "_1_ingest", "_2_enrich").
+        step: Pipeline step name (e.g. "_1_r2b", "_2_b2s").
 
     Returns:
         dict with keys: read_layer, write_layer (medallion layer names).
@@ -190,16 +190,20 @@ def build_table_name(
 
 
 # =============================================================================
-# BACKWARD-COMPATIBLE WRAPPERS (used by _0_convert/common.py)
+# BACKWARD-COMPATIBLE WRAPPERS (used by _0_convert/converter_utils.py)
 # =============================================================================
 
-def get_env_variables(spark) -> dict:
+def get_env_variables(spark, env_override: str = None) -> dict:
     """Backward-compatible: returns flat dict matching old ENVIRONMENT_CONFIG style.
+
+    Args:
+        spark: Active SparkSession instance.
+        env_override: Optional explicit environment override.
 
     Returns dict with keys: environment, storage_account, container,
     unity_catalog, unity_schema.
     """
-    env = env_variables(spark)
+    env = env_variables(spark, env_override=env_override)
     environment = env["environment"]
     medal = medallion_variables("raw", environment)
 

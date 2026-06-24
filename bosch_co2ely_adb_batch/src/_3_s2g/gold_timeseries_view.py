@@ -5,7 +5,7 @@ consumed by the Dash frontend for chart rendering.
 
 Usage (via Databricks job):
     spark_python_task:
-        python_file: ../src/_3_gold/gold_timeseries_view.py
+        python_file: ../src/_3_s2g/gold_timeseries_view.py
         parameters: ["--env", "dev", "--is_integration_test", "false"]
 """
 
@@ -51,7 +51,7 @@ def main():
 
     # Resolve environment
     env = env_variables(spark, env_override=args.env)
-    read_layer = layer_variables("_3_gold")
+    read_layer = layer_variables("_3_s2g")
     read_medal = medallion_variables(read_layer["read_layer"])
     write_medal = medallion_variables(read_layer["write_layer"])
 

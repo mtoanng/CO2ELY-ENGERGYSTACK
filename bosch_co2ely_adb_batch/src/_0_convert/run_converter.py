@@ -63,7 +63,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 # Module-level import required for _process_single_file (called via addPyFile workers)
-from common import build_abfss_path
+from converter_utils import build_abfss_path
 
 
 # =============================================================================
@@ -230,7 +230,7 @@ def _process_single_file(
                         f"{len(results)} group(s), {duration:.1f}s{retry_info})")
 
             return Row(
-                blob_path=relative_path,
+                blob_path=blob_path,
                 file_name=file_name,
                 file_size=file_size,
                 file_uuid=file_uuid,
@@ -260,7 +260,7 @@ def _process_single_file(
     error_prefix = f"[after {MAX_RETRIES} retries] " if _is_transient_error(last_error) else ""
     logger.error(f"  FAIL: {relative_path} — {error_prefix}{last_error}")
     return Row(
-        blob_path=relative_path,
+        blob_path=blob_path,
         file_name=file_name,
         file_size=file_size,
         file_uuid=None,
@@ -301,7 +301,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         return
 
     # Lazy imports — only loaded on workers that actually process data
-    from common import (
+    from converter_utils import (
         get_blob_service_client, generate_file_uuid, sanitize_name,
         build_abfss_path, ParquetWriter, logger,
     )
@@ -395,13 +395,12 @@ def main():
     global THREADS_PER_PARTITION
     THREADS_PER_PARTITION = threads_per_partition
 
-    # Import common utilities (driver-side)
-    from common import (
-        get_env_variables, get_adls_config, IncrementalTracker, logger,
-    )
+    # Import driver-side helpers from shared config and converter utilities.
+    from common_config import get_adls_config, get_env_variables
+    from converter_utils import IncrementalTracker, logger
 
     # --- 1. Environment detection ---
-    env_vars = get_env_variables(spark)
+    env_vars = get_env_variables(spark, env_override=args.env)
     adls_config = get_adls_config(env_vars)
     storage_account = adls_config["storage_account"]
     container = adls_config["container"]
@@ -438,7 +437,7 @@ def main():
     # Skip files that have exceeded max total retries (permanently broken)
     if new_blobs:
         try:
-            paths_sql = ",".join(f"'{b.relative_path}'" for b in new_blobs)
+            paths_sql = ",".join(f"'{b.blob_path}'" for b in new_blobs)
             exhausted = spark.sql(
                 f"SELECT blob_path FROM {tracking_table} "
                 f"WHERE status = 'FAILED' AND retry_count >= {MAX_TOTAL_RETRIES} "
@@ -450,7 +449,7 @@ def main():
                                f"max retries ({MAX_TOTAL_RETRIES}):")
                 for p in exhausted_paths:
                     logger.warning(f"  SKIP: {p}")
-                new_blobs = [b for b in new_blobs if b.relative_path not in exhausted_paths]
+                new_blobs = [b for b in new_blobs if b.blob_path not in exhausted_paths]
         except Exception:
             # retry_count column might not exist yet (first run) — proceed anyway
             pass
@@ -492,7 +491,7 @@ def main():
 
     # Distribute source modules for worker imports (uses _SRC_DIR computed at top)
     src_dir = Path(_SRC_DIR)
-    for module_file in ["common.py", "xlsx_converter.py", "csv_converter.py"]:
+    for module_file in ["converter_utils.py", "xlsx_converter.py", "csv_converter.py"]:
         module_path = str(src_dir / module_file)
         spark.sparkContext.addPyFile(module_path)
 

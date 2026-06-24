@@ -1,4 +1,4 @@
-"""Unit tests for _0_convert/common.py (converter-specific utilities).
+"""Unit tests for _0_convert/converter_utils.py (converter-specific utilities).
 
 Tests UUID generation, sanitization, schema validation, PyArrow table builders,
 unpivot logic (both standard and chunked), and transient error detection.
@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime, timezone
 
-from common import (
+from converter_utils import (
     generate_file_uuid,
     sanitize_name,
     detect_units_row,
@@ -185,9 +185,9 @@ class TestBuildFilemeta:
         assert result.column("raw_file_name")[0].as_py() == "myfile.xlsx"
 
     def test_ingested_timestamp_auto_set(self):
-        before = datetime.now(tz=timezone.utc)
+        before = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         result = build_filemeta("f.xlsx", "u", 1, None)
-        after = datetime.now(tz=timezone.utc)
+        after = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         ts = result.column("ingested_timestamp")[0].as_py()
         assert before <= ts <= after
 

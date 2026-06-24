@@ -26,7 +26,7 @@ from typing import List, Optional
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from common import (
+from converter_utils import (
     SCHEMAS, ConversionResult, unpivot_timeseries,
     generate_file_uuid, build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,

@@ -3,9 +3,9 @@
   "domain": "CO2 Electrolysis",
   "medallion_layers": {
     "_0_convert": {"read": "raw_volume", "write": "parquet_volume"},
-    "_1_ingest": {"read": "parquet_volume", "write": "bronze"},
-    "_2_enrich": {"read": "bronze", "write": "silver"},
-    "_3_gold": {"read": "silver", "write": "gold"}
+    "_1_r2b": {"read": "parquet_volume", "write": "bronze"},
+    "_2_b2s": {"read": "bronze", "write": "silver"},
+    "_3_s2g": {"read": "silver", "write": "gold"}
   },
   "schemas": {
     "converter": "converter",
