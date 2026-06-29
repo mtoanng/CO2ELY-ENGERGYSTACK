@@ -53,12 +53,20 @@ common_e2e_job_settings: &common_e2e_job_settings
         - task_key: tsk_bronze
       run_if: ALL_DONE
 
+    - task_key: tsk_dq
+      run_job_task:
+        job_id: ${resources.jobs.job_co2_dq.id}
+      timeout_seconds: 0
+      depends_on:
+        - task_key: tsk_silver
+      run_if: ALL_DONE
+
     - task_key: tsk_gold
       run_job_task:
         job_id: ${resources.jobs.job_co2_gold.id}
       timeout_seconds: 0
       depends_on:
-        - task_key: tsk_silver
+        - task_key: tsk_dq
       run_if: ALL_DONE
 
 # Setting for integration test

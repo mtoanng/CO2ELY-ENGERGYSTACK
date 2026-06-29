@@ -1,4 +1,4 @@
-"""Unit tests for _1_ingest/ingest_parquet_to_bronze.py.
+"""Unit tests for _1_r2b/ingest_parquet_to_bronze.py.
 
 Tests argument parsing, path construction, Auto Loader config validation,
 and environment resolution for the bronze ingestion job.
@@ -11,8 +11,10 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+from common_io_utils import build_external_table_location
+
 # Ensure ingest module is importable
-_INGEST_DIR = Path(__file__).resolve().parent.parent.parent / "_1_ingest"
+_INGEST_DIR = Path(__file__).resolve().parent.parent.parent / "_1_r2b"
 sys.path.insert(0, str(_INGEST_DIR))
 
 from common_config import (
@@ -36,7 +38,7 @@ class TestPathConstruction:
         env = env_variables(mock_spark)
         adls_domain = env["adls_domain"]
         storage_account = adls_domain.replace(".dfs.core.windows.net", "")
-        layers = layer_variables("_1_ingest")
+        layers = layer_variables("_1_r2b")
         read_medal = medallion_variables(layers["read_layer"], env["environment"])
         container = read_medal["adls_container"]
         output_prefix = CONVERTER_CONFIG["output_prefix"]
@@ -51,7 +53,7 @@ class TestPathConstruction:
         env = env_variables(mock_spark)
         adls_domain = env["adls_domain"]
         storage_account = adls_domain.replace(".dfs.core.windows.net", "")
-        layers = layer_variables("_1_ingest")
+        layers = layer_variables("_1_r2b")
         read_medal = medallion_variables(layers["read_layer"], env["environment"])
         container = read_medal["adls_container"]
         output_prefix = CONVERTER_CONFIG["output_prefix"]
@@ -63,6 +65,12 @@ class TestPathConstruction:
         output_prefix = CONVERTER_CONFIG["output_prefix"]
         int_test_prefix = f"{output_prefix}/_int_test"
         assert int_test_prefix == "parquet_raw/_int_test"
+
+    def test_integration_test_locations_isolated(self):
+        prod_location = build_external_table_location("storage", "container", "bronze", "timeseries")
+        test_location = build_external_table_location("storage", "container", "bronze_int_test", "timeseries")
+        assert prod_location != test_location
+        assert "/bronze_int_test/timeseries/" in test_location
 
     def test_source_path_per_table_type(self):
         """Each table type gets its own subdirectory."""
@@ -81,7 +89,7 @@ class TestBronzeTableNames:
 
     def test_dev_table_names(self, mock_spark):
         env = env_variables(mock_spark)
-        layers = layer_variables("_1_ingest")
+        layers = layer_variables("_1_r2b")
         write_medal = medallion_variables(layers["write_layer"], env["environment"])
         catalog = env["unity_catalog"]
         schema = write_medal["uc_schema"]
@@ -93,7 +101,7 @@ class TestBronzeTableNames:
 
     def test_integration_test_names(self, mock_spark):
         env = env_variables(mock_spark)
-        layers = layer_variables("_1_ingest")
+        layers = layer_variables("_1_r2b")
         write_medal = medallion_variables(layers["write_layer"], env["environment"])
 
         name = build_table_name(
@@ -104,7 +112,7 @@ class TestBronzeTableNames:
 
     def test_qa_table_names(self, mock_spark_qa):
         env = env_variables(mock_spark_qa)
-        layers = layer_variables("_1_ingest")
+        layers = layer_variables("_1_r2b")
         write_medal = medallion_variables(layers["write_layer"], env["environment"])
 
         name = build_table_name(env["unity_catalog"], write_medal["uc_schema"],
@@ -155,23 +163,19 @@ class TestArgParsing:
 
     def test_default_args(self):
         with patch("sys.argv", ["prog"]):
-            # Import parse_args from the module
             sys.path.insert(0, str(_INGEST_DIR))
-            # We test the logic inline since import is complex
-            import argparse
-            parser = argparse.ArgumentParser()
-            parser.add_argument("--is_integration_test", type=str, default="false")
-            parser.add_argument("--env", type=str, default="dev_user")
-            args, _ = parser.parse_known_args([])
-            assert args.is_integration_test == "false"
-            assert args.env == "dev_user"
+            from common_system_utils import get_job_args
+
+            args = get_job_args()
+            assert args.is_integration_test is False
+            assert args.env == "dev"
 
     def test_integration_test_true(self):
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--is_integration_test", type=str, default="false")
-        args, _ = parser.parse_known_args(["--is_integration_test", "true"])
-        assert args.is_integration_test.lower() == "true"
+        with patch("sys.argv", ["prog", "--is_integration_test", "true"]):
+            from common_system_utils import get_job_args
+
+            args = get_job_args()
+            assert args.is_integration_test is True
 
 
 # =============================================================================

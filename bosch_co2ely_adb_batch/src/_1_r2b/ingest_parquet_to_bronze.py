@@ -20,13 +20,12 @@ Tables written:
 
 Usage (via Databricks job):
     spark_python_task:
-        python_file: ../src/_1_ingest/ingest_parquet_to_bronze.py
+        python_file: ../src/_1_r2b/ingest_parquet_to_bronze.py
         parameters:
           - "--is_integration_test" / "--env"
 """
 import sys
 import time
-import argparse
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -47,6 +46,7 @@ from common_config import (
     build_table_name, CONVERTER_CONFIG, TABLE_TYPES, logger,
 )
 from common_io_utils import build_external_table_location
+from common_system_utils import get_job_args
 
 
 # =============================================================================
@@ -54,11 +54,7 @@ from common_io_utils import build_external_table_location
 # =============================================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="ELY Bronze Ingestion (Auto Loader)")
-    parser.add_argument("--is_integration_test", type=str, default="false")
-    parser.add_argument("--env", type=str, default="dev_user")
-    args, _ = parser.parse_known_args()
-    return args
+    return get_job_args()
 
 
 def main():
@@ -66,15 +62,15 @@ def main():
     spark = SparkSession.builder.getOrCreate()
     t_start = time.perf_counter()
 
-    is_integration_test = args.is_integration_test.lower() == "true"
+    is_integration_test = args.is_integration_test
 
     # --- Resolve environment ---
-    env = env_variables(spark)
+    env = env_variables(spark, env_override=args.env)
     environment = env["environment"]
     catalog = env["unity_catalog"]
 
-    # Resolve layers: _1_ingest reads from "raw" (parquet), writes to "bronze" (Delta)
-    layers = layer_variables("_1_ingest")
+    # Resolve layers: _1_r2b reads from "raw" (parquet), writes to "bronze" (Delta)
+    layers = layer_variables("_1_r2b")
     read_medal = medallion_variables(layers["read_layer"], environment)
     write_medal = medallion_variables(layers["write_layer"], environment)
 
@@ -132,10 +128,11 @@ def main():
         )
 
         # Build external table location (bronze layer)
+        bronze_layer = "bronze_int_test" if is_integration_test else "bronze"
         location = build_external_table_location(
             storage_account=storage_account,
             container=container,
-            layer="bronze",
+            layer=bronze_layer,
             table_name=table_type,
         )
 

@@ -2,28 +2,28 @@
 
 Utilities categories:
 
-  ADLS path builders (no Spark required):
+  ADLS path builders:
     build_abfss_path              - Build abfss:// URI from components
     build_external_table_location - Build ABFSS location for external Delta table
 
-  Delta write operations (requires Spark):
+  Delta write operations (Spark):
     write_to_delta                - Write Spark DataFrame to Delta (managed or external)
 
-  Polars conversion utilities (requires polars — re-exported from _2_enrich/enrich_utils.py):
+  Polars conversion utilities:
     polars_to_spark               - Convert Polars DataFrame to Spark DataFrame
     read_excel_polars             - Read Excel file via Polars calamine engine
 """
 
 # Polars-dependent functions (only importable when polars is installed)
 try:
-    from _2_enrich.enrich_utils import polars_to_spark, read_excel_polars
+    from _2_b2s.enrich_utils import polars_to_spark, read_excel_polars
 except ImportError:
     # polars not installed (e.g. bronze job) - provide stub that raises
     def polars_to_spark(*args, **kwargs):
-        raise ImportError("polars_to_spark requires polars. Import from _2_enrich.enrich_utils instead.")
+        raise ImportError("polars_to_spark requires polars. Import from _2_b2s.enrich_utils instead.")
 
     def read_excel_polars(*args, **kwargs):
-        raise ImportError("read_excel_polars requires polars. Import from _2_enrich.enrich_utils instead.")
+        raise ImportError("read_excel_polars requires polars. Import from _2_b2s.enrich_utils instead.")
 
 
 # =============================================================================
@@ -59,7 +59,7 @@ def build_external_table_location(
         table_name: Base table name (e.g. "timeseries", "filemeta")
 
     Returns:
-        Full ABFSS location URI with trailing slash.
+        Full ABFSS location URI.
 
     Example:
         >>> build_external_table_location(

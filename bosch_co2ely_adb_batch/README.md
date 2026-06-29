@@ -20,18 +20,18 @@ Built as a **Declarative Automation Bundle** (DAB).
 ```
 UC Volume (.xlsx uploads)
     │
-    ▼ _1_ingest (Polars calamine)
+    ▼ _1_r2b (Polars calamine)
 ┌─────────────────────┐
 │  Bronze Delta Table │  bronze_co2_timeseries
 └─────────────────────┘
     │
-    ▼ _2_enrich (Polars)
+    ▼ _2_b2s (Polars)
 ┌─────────────────────┐
 │  Silver Enriched    │  silver_co2_timeseries_enriched (12 metrics)
 │  Silver Aggregated  │  silver_co2_timeseries_aggregated (15-min bins)
 └─────────────────────┘
     │
-    ▼ _3_gold
+    ▼ _3_s2g
 ┌─────────────────────┐
 │  Gold Summary       │  gold_co2_summary_statistics (KPIs)
 │  Gold Dashboard     │  gold_co2_timeseries_dashboard (chart data)
@@ -52,12 +52,12 @@ CO-ESTACK-ADB/                          ← Git repo root
     │   └── job_co2_e2e.yml
     └── src/
         ├── __init__.py
-        ├── _1_ingest/
+        ├── _1_r2b/
         │   └── ingest_excel_to_bronze.py
-        ├── _2_enrich/
+        ├── _2_b2s/
         │   ├── enrich_timeseries.py
         │   └── aggregate_timeseries.py
-        ├── _3_gold/
+        ├── _3_s2g/
         │   ├── gold_summary_statistics.py
         │   └── gold_timeseries_view.py
         └── _5_common/

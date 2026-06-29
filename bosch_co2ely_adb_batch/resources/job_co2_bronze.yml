@@ -63,7 +63,7 @@ common_r2b_job_settings: &common_r2b_job_settings
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
-        python_file: ../src/_1_ingest/ingest_parquet_to_bronze.py
+        python_file: ../src/_1_r2b/ingest_parquet_to_bronze.py
         parameters:
           - "--is_integration_test"
           - "{{job.parameters.is_integration_test}}"

@@ -1,12 +1,15 @@
-# Silver layer: Polars enrichment + time-binned aggregation
-# Mirrors the CO_energystacck app's 12-formula enrichment pipeline.
+# Silver data quality job: evaluates timeseries DQ rules and deletes invalid records by default.
 
-common_silver_job_settings: &common_silver_job_settings
+common_dq_job_settings: &common_dq_job_settings
   parameters:
     - name: "is_integration_test"
       default: "false"
     - name: "env"
       default: ${bundle.environment}
+    - name: "cleanup_mode"
+      default: "delete_invalid"
+    - name: "apply_to_blocking_only"
+      default: "true"
   permissions:
     - group_name: "idm2bcd_dssi03prod_co2elyd_data"
       level: "CAN_MANAGE"
@@ -30,62 +33,53 @@ common_silver_job_settings: &common_silver_job_settings
           product_department_team: "ELY"
           project: "CO_energystack"
   tasks:
-    - task_key: tsk_silver_base
+    - task_key: tsk_timeseries_dq
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
-        python_file: ../src/_2_b2s/silver_base.py
+        python_file: ../src/_2_b2s/dq_timeseries.py
         parameters:
           - "--is_integration_test"
           - "{{job.parameters.is_integration_test}}"
           - "--env"
           - "${bundle.environment}"
-
-    - task_key: tsk_silver_timeseries_enriched
-      run_if: "ALL_SUCCESS"
-      depends_on:
-        - task_key: tsk_silver_base
-      job_cluster_key: job_cluster
-      spark_python_task:
-        python_file: ../src/_2_b2s/silver_timeseries_enriched.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
+          - "--cleanup_mode"
+          - "{{job.parameters.cleanup_mode}}"
+          - "--apply_to_blocking_only"
+          - "{{job.parameters.apply_to_blocking_only}}"
 
 targets:
   dev_user:
     resources:
       jobs:
-        job_co2_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_silver
+        job_co2_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_dq
 
-        job_co2_int_test_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+        job_co2_int_test_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_int_test_dq
 
   dev:
     resources:
       jobs:
-        job_co2_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_silver
+        job_co2_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_dq
 
   qa:
     resources:
       jobs:
-        job_co2_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_silver
+        job_co2_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_dq
 
   prod:
     resources:
       jobs:
-        job_co2_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_silver
+        job_co2_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_dq
           email_notifications:
             on_failure:
               - got4hc@bosch.com
@@ -94,20 +88,20 @@ targets:
   dev_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+        job_co2_int_test_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_int_test_dq
 
   qa_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+        job_co2_int_test_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_int_test_dq
 
   prod_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
-          <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+        job_co2_int_test_dq:
+          <<: *common_dq_job_settings
+          name: job_co2_int_test_dq

@@ -3,10 +3,10 @@
 Usage:
     pytest src/_9_tests/ -v
     pytest src/_9_tests/unit/ -v --no-header
-    pytest src/_9_tests/unit/test_converter_5_common.py -v
+    pytest src/_9_tests/unit/test_common.py -v
 
 Path setup:
-    Fixtures handle sys.path insertion for _5_common, _0_convert, _2_enrich.
+    Fixtures handle sys.path insertion for _5_common, _0_convert, _2_b2s.
     Individual test files do NOT need sys.path manipulation.
 """
 
@@ -26,7 +26,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent  # src/
 sys.path.insert(0, str(_REPO_ROOT / "_5_common"))
 sys.path.insert(0, str(_REPO_ROOT / "_0_convert"))
-sys.path.insert(0, str(_REPO_ROOT / "_2_enrich"))
+sys.path.insert(0, str(_REPO_ROOT / "_2_b2s"))
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def sample_xlsx_bytes():
 @pytest.fixture
 def sample_blob_info():
     """Sample BlobInfo object for testing tracker/listing."""
-    from common import BlobInfo
+    from converter_utils import BlobInfo
 
     return BlobInfo(
         blob_path="raw_data/test/PoC_Stack_II/measurement_001.xlsx",

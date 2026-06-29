@@ -11,7 +11,7 @@ import polars as pl
 import pyarrow as pa
 from unittest.mock import patch
 
-from common import (
+from converter_utils import (
     SCHEMAS, TABLE_TYPES, ConversionResult,
     build_filemeta, build_channel, build_statistics,
     detect_units_row, unpivot_timeseries,
@@ -163,8 +163,7 @@ class TestChunkingThreshold:
 
     def test_large_sheet_chunked(self):
         """Above threshold: uses generic_unpivot_chunked (BytesIO)."""
-        # 200 rows x 300 cols = 60_000 cells > threshold
-        n_cells = 200 * 300
+        n_cells = TIMESERIES_CHUNK_THRESHOLD + 1
         assert n_cells > TIMESERIES_CHUNK_THRESHOLD
 
 

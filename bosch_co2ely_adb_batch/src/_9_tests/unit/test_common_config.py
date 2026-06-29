@@ -117,15 +117,15 @@ class TestLayerVariables:
         assert result == {"read_layer": "raw", "write_layer": "raw"}
 
     def test_ingest_reads_raw_writes_bronze(self):
-        result = layer_variables("_1_ingest")
+        result = layer_variables("_1_r2b")
         assert result == {"read_layer": "raw", "write_layer": "bronze"}
 
     def test_enrich_reads_bronze_writes_silver(self):
-        result = layer_variables("_2_enrich")
+        result = layer_variables("_2_b2s")
         assert result == {"read_layer": "bronze", "write_layer": "silver"}
 
     def test_gold_reads_silver_writes_gold(self):
-        result = layer_variables("_3_gold")
+        result = layer_variables("_3_s2g")
         assert result == {"read_layer": "silver", "write_layer": "gold"}
 
     def test_invalid_step_raises(self):
@@ -149,8 +149,8 @@ class TestBuildTableName:
         assert result == "ps_xplatform_dev.co2elyd_dev.bronze_filemeta_int_test"
 
     def test_no_integration_test_suffix(self):
-        result = build_table_name("catalog", "schema", "silver", "channel", False)
-        assert result == "catalog.schema.silver_channel"
+        result = build_table_name("catalog", "schema", "silver", "dim_channel", False)
+        assert result == "catalog.schema.silver_dim_channel"
         assert "_int_test" not in result
 
     def test_all_table_types_produce_valid_names(self):
@@ -212,6 +212,11 @@ class TestBackwardCompatWrappers:
     def test_get_env_variables_storage_account_extracted(self, mock_spark):
         result = get_env_variables(mock_spark)
         assert result["storage_account"] == "stpsbdodxdev2datalake"
+
+    def test_get_env_variables_honors_env_override(self, mock_spark):
+        result = get_env_variables(mock_spark, env_override="local")
+        assert result["environment"] == "local"
+        assert result["storage_account"] is None
 
     def test_get_adls_config_returns_paths(self, mock_spark):
         env = get_env_variables(mock_spark)
