@@ -83,10 +83,11 @@ def _merge_datetime_columns(
         with the time column removed and date column replaced by timestamp.
         Returns inputs unchanged if no merge pattern detected.
     """
-    # Find "Real time" column index
+    # Find "Real time" column index. Some files keep that label in row 1 while
+    # row 2 has a friendlier display name such as "Measurement Time".
     rt_idx = None
-    for i, ch in enumerate(row2_channel_name):
-        if _REALTIME_PATTERN.match(ch):
+    for i, (row1, row2, col) in enumerate(zip(row1_channel, row2_channel_name, columns)):
+        if any(_REALTIME_PATTERN.match(str(value).strip()) for value in (row1, row2, col)):
             rt_idx = i
             break
 
@@ -96,11 +97,21 @@ def _merge_datetime_columns(
     date_col = columns[rt_idx]
     time_col = columns[rt_idx + 1]
 
-    # Verify the next column is the split partner (unnamed or duplicate)
-    next_ch = row2_channel_name[rt_idx + 1]
-    # if not (next_ch.startswith("unnamed") or next_ch.startswith("Real time") or
-    #         next_ch.startswith("real time") or next_ch == ""):
-    #     return df, columns, row1_channel, row2_channel_name, units
+    # Verify the next column is the split partner, not a real named signal.
+    next_values = [
+        str(columns[rt_idx + 1]).strip(),
+        str(row1_channel[rt_idx + 1]).strip(),
+        str(row2_channel_name[rt_idx + 1]).strip(),
+    ]
+    is_split_partner = any(
+        not value
+        or value.lower().startswith("unnamed")
+        or value.lower().startswith("column_")
+        or re.match(r"^real\s*time(_\d+)?$", value, re.IGNORECASE)
+        for value in next_values
+    )
+    if not is_split_partner:
+        return df, columns, row1_channel, row2_channel_name, units
 
     # Peek at first few non-null values to confirm calamine date/time pattern.
     # If both columns are entirely null, still merge structurally so downstream
