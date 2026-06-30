@@ -46,10 +46,10 @@ CO-ESTACK-ADB/                          ← Git repo root
     ├── databricks.yml
     ├── .gitignore
     ├── resources/
-    │   ├── job_co2_bronze.yml
-    │   ├── job_co2_silver.yml
-    │   ├── job_co2_gold.yml
-    │   └── job_co2_e2e.yml
+    │   ├── job_co2ely_bronze.yml
+    │   ├── job_co2ely_silver.yml
+    │   ├── job_co2ely_gold.yml
+    │   └── job_co2ely_e2e.yml
     └── src/
         ├── __init__.py
         ├── _1_r2b/
@@ -75,7 +75,7 @@ databricks bundle validate -t dev_user
 databricks bundle deploy -t dev_user
 
 # Run end-to-end pipeline
-databricks bundle run job_co2_e2e -t dev_user
+databricks bundle run job_co2ely_e2e -t dev_user
 
 # Deploy to production
 databricks bundle deploy -t prod

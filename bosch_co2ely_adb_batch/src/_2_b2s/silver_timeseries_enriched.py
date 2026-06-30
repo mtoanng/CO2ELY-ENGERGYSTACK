@@ -19,9 +19,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession, DataFrame, functions as F
+from pyspark.sql.utils import AnalysisException
 
 from _5_common.common_utils import (
     build_table_name,
@@ -216,14 +221,26 @@ def main():
     channel_df = spark.read.table(source_channel)
     enriched_df = build_enriched_timeseries_df(timeseries_df, channel_df)
 
+    key_columns = ["uuid", "group", "sample_offset", "channel"]
+    try:
+        existing_keys = spark.read.table(target_table).select(*key_columns).distinct()
+        enriched_df = enriched_df.join(existing_keys, on=key_columns, how="left_anti")
+    except AnalysisException:
+        pass
+
+    rows_to_write = enriched_df.count()
+    if rows_to_write == 0:
+        logger.info(f"No new rows for {target_table}")
+        return
+
     location = build_external_table_location(
         storage_account=storage_account,
         container=medal["adls_container"],
         layer=medal["table_prefix"],
         table_name="fact_timeseries_enriched",
     )
-    write_to_delta(enriched_df, target_table, mode="overwrite", location=location)
-    logger.info(f"Published {target_table}")
+    write_to_delta(enriched_df, target_table, mode="append", location=location)
+    logger.info(f"Published {rows_to_write:,} new row(s) -> {target_table}")
 
 
 if __name__ == "__main__":

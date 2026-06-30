@@ -58,34 +58,34 @@ targets:
   dev_user:
     resources:
       jobs:
-        job_co2_silver:
+        job_co2ely_silver:
           <<: *common_silver_job_settings
-          name: job_co2_silver
+          name: job_co2ely_silver
 
-        job_co2_int_test_silver:
+        job_co2ely_int_test_silver:
           <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+          name: job_co2ely_int_test_silver
 
   dev:
     resources:
       jobs:
-        job_co2_silver:
+        job_co2ely_silver:
           <<: *common_silver_job_settings
-          name: job_co2_silver
+          name: job_co2ely_silver
 
   qa:
     resources:
       jobs:
-        job_co2_silver:
+        job_co2ely_silver:
           <<: *common_silver_job_settings
-          name: job_co2_silver
+          name: job_co2ely_silver
 
   prod:
     resources:
       jobs:
-        job_co2_silver:
+        job_co2ely_silver:
           <<: *common_silver_job_settings
-          name: job_co2_silver
+          name: job_co2ely_silver
           email_notifications:
             on_failure:
               - got4hc@bosch.com
@@ -94,20 +94,20 @@ targets:
   dev_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
+        job_co2ely_int_test_silver:
           <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+          name: job_co2ely_int_test_silver
 
   qa_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
+        job_co2ely_int_test_silver:
           <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+          name: job_co2ely_int_test_silver
 
   prod_integration_test:
     resources:
       jobs:
-        job_co2_int_test_silver:
+        job_co2ely_int_test_silver:
           <<: *common_silver_job_settings
-          name: job_co2_int_test_silver
+          name: job_co2ely_int_test_silver

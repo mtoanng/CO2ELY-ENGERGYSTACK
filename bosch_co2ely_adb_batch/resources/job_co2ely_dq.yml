@@ -52,34 +52,34 @@ targets:
   dev_user:
     resources:
       jobs:
-        job_co2_dq:
+        job_co2ely_dq:
           <<: *common_dq_job_settings
-          name: job_co2_dq
+          name: job_co2ely_dq
 
-        job_co2_int_test_dq:
+        job_co2ely_int_test_dq:
           <<: *common_dq_job_settings
-          name: job_co2_int_test_dq
+          name: job_co2ely_int_test_dq
 
   dev:
     resources:
       jobs:
-        job_co2_dq:
+        job_co2ely_dq:
           <<: *common_dq_job_settings
-          name: job_co2_dq
+          name: job_co2ely_dq
 
   qa:
     resources:
       jobs:
-        job_co2_dq:
+        job_co2ely_dq:
           <<: *common_dq_job_settings
-          name: job_co2_dq
+          name: job_co2ely_dq
 
   prod:
     resources:
       jobs:
-        job_co2_dq:
+        job_co2ely_dq:
           <<: *common_dq_job_settings
-          name: job_co2_dq
+          name: job_co2ely_dq
           email_notifications:
             on_failure:
               - got4hc@bosch.com
@@ -88,20 +88,20 @@ targets:
   dev_integration_test:
     resources:
       jobs:
-        job_co2_int_test_dq:
+        job_co2ely_int_test_dq:
           <<: *common_dq_job_settings
-          name: job_co2_int_test_dq
+          name: job_co2ely_int_test_dq
 
   qa_integration_test:
     resources:
       jobs:
-        job_co2_int_test_dq:
+        job_co2ely_int_test_dq:
           <<: *common_dq_job_settings
-          name: job_co2_int_test_dq
+          name: job_co2ely_int_test_dq
 
   prod_integration_test:
     resources:
       jobs:
-        job_co2_int_test_dq:
+        job_co2ely_int_test_dq:
           <<: *common_dq_job_settings
-          name: job_co2_int_test_dq
+          name: job_co2ely_int_test_dq

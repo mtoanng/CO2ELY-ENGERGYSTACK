@@ -18,10 +18,15 @@ Usage (via Databricks job):
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp
+from pyspark.sql.utils import AnalysisException
 
 from _5_common.common_utils import (
     build_table_name,
@@ -42,12 +47,31 @@ SILVER_ENTITY_MAP = {
     "statistics": "fact_statistics",
 }
 
+SILVER_ENTITY_KEYS = {
+    "filemeta": ["uuid"],
+    "channel": ["uuid", "group", "channel"],
+    "timeseries": ["uuid", "group", "sample_offset", "channel"],
+    "statistics": ["uuid", "group"],
+}
 
-def _copy_table(spark, source_table: str, target_table: str, location: str):
-    """Copy a bronze table to its external silver dim/fact counterpart."""
+
+def _copy_table(spark, source_table: str, target_table: str, location: str, key_columns: list[str]):
+    """Append bronze rows not yet present in the silver dim/fact table."""
     df = spark.read.table(source_table).withColumn("_silver_published_at", current_timestamp())
-    write_to_delta(df, target_table, mode="overwrite", location=location)
-    logger.info(f"Published {source_table} -> {target_table}")
+
+    try:
+        existing_keys = spark.read.table(target_table).select(*key_columns).distinct()
+        df = df.join(existing_keys, on=key_columns, how="left_anti")
+    except AnalysisException:
+        pass
+
+    rows_to_write = df.count()
+    if rows_to_write == 0:
+        logger.info(f"No new rows for {target_table}")
+        return
+
+    write_to_delta(df, target_table, mode="append", location=location)
+    logger.info(f"Published {rows_to_write:,} new row(s): {source_table} -> {target_table}")
 
 
 def main():
@@ -94,7 +118,7 @@ def main():
             layer=write_medal["table_prefix"],
             table_name=silver_table,
         )
-        _copy_table(spark, source_table, target_table, location)
+        _copy_table(spark, source_table, target_table, location, SILVER_ENTITY_KEYS[bronze_table])
 
 
 if __name__ == "__main__":

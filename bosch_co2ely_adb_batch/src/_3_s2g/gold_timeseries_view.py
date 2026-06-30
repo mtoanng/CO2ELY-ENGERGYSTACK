@@ -72,18 +72,16 @@ _ELAPSED_PATTERN = r"(elapsed[\s_]?time|test[\s_]?time)"
 _AGG_BIN_S = 60.0
 
 
-def _already_written(spark: SparkSession, table: str) -> "set[tuple]":
-    """Return the set of (uuid, group) pairs already present in a Delta table.
+def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
+    """Return distinct (uuid, group) pairs already present in a Delta table.
 
-    Returns an empty set if the table does not exist yet.
+    Returns an empty DataFrame if the table does not exist yet. Keeping this as
+    a DataFrame avoids collecting all processed pairs to the driver.
     """
     try:
-        return {
-            (r.uuid, r.group)
-            for r in spark.read.table(table).select("uuid", "group").distinct().collect()
-        }
+        return spark.read.table(table).select("uuid", "group").distinct()
     except AnalysisException:
-        return set()
+        return spark.createDataFrame([], "uuid string, group string")
 
 
 def _build_gold_timeseries(
@@ -190,19 +188,21 @@ def main():
     logger.info("=" * 60)
 
     # --- Incremental: find (uuid, group) pairs already in gold ---
-    done_ts  = _already_written(spark, gold_ts_table)
-    done_agg = _already_written(spark, gold_agg_table)
-    missing_agg = done_ts - done_agg
-    logger.info(f"  Existing gold_timeseries pairs: {len(done_ts)}")
-    logger.info(f"  Existing gold_timeseries_agg pairs: {len(done_agg)}")
+    done_ts_df = _existing_pairs(spark, gold_ts_table)
+    done_agg_df = _existing_pairs(spark, gold_agg_table)
+
+    done_ts_count = done_ts_df.count()
+    done_agg_count = done_agg_df.count()
+    logger.info(f"  Existing gold_timeseries pairs: {done_ts_count}")
+    logger.info(f"  Existing gold_timeseries_agg pairs: {done_agg_count}")
+
+    missing_agg_df = done_ts_df.join(done_agg_df, on=["uuid", "group"], how="left_anti")
+    missing_agg_count = missing_agg_df.count()
 
     # If raw gold exists but aggregate is missing, backfill aggregate from raw
     # gold instead of reprocessing bronze and duplicating raw rows.
-    if missing_agg:
-        logger.info(f"  Backfilling aggregate for {len(missing_agg)} existing pair(s)")
-        missing_agg_df = spark.createDataFrame(
-            list(missing_agg), schema=["uuid", "group"]
-        )
+    if missing_agg_count:
+        logger.info(f"  Backfilling aggregate for {missing_agg_count} existing pair(s)")
         backfill_gold_ts = spark.read.table(gold_ts_table).join(
             missing_agg_df, on=["uuid", "group"], how="inner"
         )
@@ -224,22 +224,18 @@ def main():
     fm = spark.read.table(bronze_fm_table)
 
     # --- Filter to raw gold pairs not written yet ---
-    if done_ts:
-        done_df = spark.createDataFrame(
-            list(done_ts), schema=["uuid", "group"]
-        )
+    new_pairs = (
+        ts.select("uuid", "group").distinct()
+        .join(done_ts_df, on=["uuid", "group"], how="left_anti")
+    )
+    new_count = new_pairs.count()
+    logger.info(f"  New (uuid, group) pairs to process: {new_count}")
+    if new_count == 0:
+        logger.info("  Nothing new to write. Exiting.")
+        return
 
-        new_pairs = (
-            ts.select("uuid", "group").distinct()
-            .join(done_df, on=["uuid", "group"], how="left_anti")
-        )
-        new_count = new_pairs.count()
-        logger.info(f"  New (uuid, group) pairs to process: {new_count}")
-        if new_count == 0:
-            logger.info("  Nothing new to write. Exiting.")
-            return
-        ts = ts.join(new_pairs, on=["uuid", "group"], how="inner")
-        ch = ch.join(new_pairs, on=["uuid", "group"], how="inner")
+    ts = ts.join(new_pairs, on=["uuid", "group"], how="inner")
+    ch = ch.join(new_pairs, on=["uuid", "group"], how="inner")
 
     # --- Extract series from filemeta ---
     fm_series = fm.withColumn(
@@ -270,7 +266,10 @@ def main():
     logger.info(f"  Appended -> {gold_ts_table}")
 
     # --- Build gold_timeseries_agg (1-min bins) ---
-    gold_agg_df = _build_gold_timeseries_agg(gold_ts_df)
+    gold_agg_df = (
+        _build_gold_timeseries_agg(gold_ts_df)
+        .join(done_agg_df, on=["uuid", "group"], how="left_anti")
+    )
 
     agg_count = gold_agg_df.count()
     logger.info(f"  gold_timeseries_agg rows (new): {agg_count:,}")

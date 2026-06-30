@@ -16,7 +16,11 @@ import json
 import argparse
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession, functions as F
 

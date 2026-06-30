@@ -45,34 +45,34 @@ targets:
   dev_user:
     resources:
       jobs:
-        job_co2_gold:
+        job_co2ely_gold:
           <<: *common_gold_job_settings
-          name: job_co2_gold
+          name: job_co2ely_gold
 
-        job_co2_int_test_gold:
+        job_co2ely_int_test_gold:
           <<: *common_gold_job_settings
-          name: job_co2_int_test_gold
+          name: job_co2ely_int_test_gold
 
   dev:
     resources:
       jobs:
-        job_co2_gold:
+        job_co2ely_gold:
           <<: *common_gold_job_settings
-          name: job_co2_gold
+          name: job_co2ely_gold
 
   qa:
     resources:
       jobs:
-        job_co2_gold:
+        job_co2ely_gold:
           <<: *common_gold_job_settings
-          name: job_co2_gold
+          name: job_co2ely_gold
 
   prod:
     resources:
       jobs:
-        job_co2_gold:
+        job_co2ely_gold:
           <<: *common_gold_job_settings
-          name: job_co2_gold
+          name: job_co2ely_gold
           email_notifications:
             on_failure:
               - got4hc@bosch.com
@@ -81,20 +81,20 @@ targets:
   dev_integration_test:
     resources:
       jobs:
-        job_co2_int_test_gold:
+        job_co2ely_int_test_gold:
           <<: *common_gold_job_settings
-          name: job_co2_int_test_gold
+          name: job_co2ely_int_test_gold
 
   qa_integration_test:
     resources:
       jobs:
-        job_co2_int_test_gold:
+        job_co2ely_int_test_gold:
           <<: *common_gold_job_settings
-          name: job_co2_int_test_gold
+          name: job_co2ely_int_test_gold
 
   prod_integration_test:
     resources:
       jobs:
-        job_co2_int_test_gold:
+        job_co2ely_int_test_gold:
           <<: *common_gold_job_settings
-          name: job_co2_int_test_gold
+          name: job_co2ely_int_test_gold
