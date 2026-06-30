@@ -63,47 +63,9 @@ except NameError:
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-# Module-level import required for _process_single_file (called via addPyFile workers)
+# Module-level imports required for _process_single_file (called via addPyFile workers)
 from converter_utils import build_abfss_path
-
-
-# =============================================================================
-# SERIES MAPPING LOADER
-# =============================================================================
-
-def _load_series_mapping() -> dict:
-    """Load channel mapping configs keyed by ADLS series folder name.
-
-    Reads sys_files/config_files/mappings/series_config.json which maps
-    folder names (first path component of relative_path) to JSON mapping
-    files in the same directory.  Returns {} if config is missing.
-
-    Returns:
-        {"PoC Stack VI": [{"file_column": ..., "schema_column": ...}, ...], ...}
-    """
-    repo_root = Path(_SRC_DIR).parent
-    mappings_dir = repo_root / "sys_files" / "config_files" / "mappings"
-    series_config_path = mappings_dir / "series_config.json"
-
-    if not series_config_path.exists():
-        from converter_utils import logger as _log
-        _log.warning(f"Series config not found at {series_config_path}. Mapping disabled.")
-        return {}
-
-    from converter_utils import logger as _log
-    series_config: dict = json.loads(series_config_path.read_text(encoding="utf-8"))
-    result: dict = {}
-    for folder_name, mapping_file in series_config.items():
-        if folder_name.startswith("_"):  # skip comment keys
-            continue
-        mapping_path = mappings_dir / mapping_file
-        if mapping_path.exists():
-            entries = json.loads(mapping_path.read_text(encoding="utf-8"))
-            result[folder_name] = entries
-            _log.info(f"  Mapping loaded: '{folder_name}' <- {mapping_file} ({len(entries)} entries)")
-        else:
-            _log.warning(f"  Mapping file not found: {mapping_path}")
-    return result
+from channel_mapping import load_series_mapping, resolve_mapping_for_path
 
 
 # =============================================================================
@@ -244,9 +206,9 @@ def _process_single_file(
             # Full abfss:// path for filemeta.file_path (downstream traceability)
             abfss_path = build_abfss_path(row.storage_account, row.container, blob_path)
 
-            # Resolve channel mapping for this series (first folder of relative_path)
-            series_name = relative_path.split("/")[0].strip() if "/" in relative_path else ""
-            mapping = (series_mapping or {}).get(series_name, [])
+            # Resolve channel mapping for this series. Integration-test paths can
+            # include extra prefixes, so inspect all relative path components.
+            mapping = resolve_mapping_for_path(relative_path, series_mapping or {})
 
             if extension in (".xlsx", ".xls"):
                 results = convert_xlsx(file_bytes, relative_path, file_size, last_modified,
@@ -536,7 +498,12 @@ def main():
 
     # Distribute source modules for worker imports (uses _SRC_DIR computed at top)
     src_dir = Path(_SRC_DIR)
-    for module_file in ["converter_utils.py", "xlsx_converter.py"]:
+    for module_file in [
+        "converter_utils.py",
+        "channel_mapping.py",
+        "derived_metrics.py",
+        "xlsx_converter.py",
+    ]:
         module_path = str(src_dir / module_file)
         spark.sparkContext.addPyFile(module_path)
 
@@ -547,7 +514,8 @@ def main():
     # --- 4. Execute distributed conversion ---
     # Load series->mapping config on driver; bake into worker closure via partial.
     # The mapping dict is small (KB) and serialized with the closure automatically.
-    series_mapping = _load_series_mapping()
+    repo_root = src_dir.parent.parent
+    series_mapping = load_series_mapping(repo_root)
     logger.info(f"Series mappings loaded: {len(series_mapping)} series configured")
     process_partition = functools.partial(_process_partition, series_mapping=series_mapping)
     results_rdd = distributed_df.rdd.mapPartitions(process_partition)

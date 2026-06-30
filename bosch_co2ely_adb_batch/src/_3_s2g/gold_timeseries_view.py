@@ -192,19 +192,42 @@ def main():
     # --- Incremental: find (uuid, group) pairs already in gold ---
     done_ts  = _already_written(spark, gold_ts_table)
     done_agg = _already_written(spark, gold_agg_table)
-    done_both = done_ts & done_agg
-    logger.info(f"  Already written: {len(done_both)} (uuid, group) pairs — skipping these")
+    missing_agg = done_ts - done_agg
+    logger.info(f"  Existing gold_timeseries pairs: {len(done_ts)}")
+    logger.info(f"  Existing gold_timeseries_agg pairs: {len(done_agg)}")
+
+    # If raw gold exists but aggregate is missing, backfill aggregate from raw
+    # gold instead of reprocessing bronze and duplicating raw rows.
+    if missing_agg:
+        logger.info(f"  Backfilling aggregate for {len(missing_agg)} existing pair(s)")
+        missing_agg_df = spark.createDataFrame(
+            list(missing_agg), schema=["uuid", "group"]
+        )
+        backfill_gold_ts = spark.read.table(gold_ts_table).join(
+            missing_agg_df, on=["uuid", "group"], how="inner"
+        )
+        backfill_agg_df = _build_gold_timeseries_agg(backfill_gold_ts)
+        backfill_count = backfill_agg_df.count()
+        if backfill_count:
+            loc_agg = build_external_table_location(
+                storage_account=storage_account,
+                container=gold_medal["adls_container"],
+                layer=gold_medal["table_prefix"],
+                table_name="timeseries_agg",
+            )
+            write_to_delta(backfill_agg_df, gold_agg_table, mode="append", location=loc_agg)
+            logger.info(f"  Backfilled {backfill_count:,} aggregate rows -> {gold_agg_table}")
 
     # --- Load bronze ---
     ts = spark.read.table(bronze_ts_table)
     ch = spark.read.table(bronze_ch_table)
     fm = spark.read.table(bronze_fm_table)
 
-    # --- Filter to new (uuid, group) pairs only ---
-    if done_both:
+    # --- Filter to raw gold pairs not written yet ---
+    if done_ts:
         done_df = spark.createDataFrame(
-            list(done_both), schema=["uuid", "group"]
-        ).withColumn("_done", F.lit(True))
+            list(done_ts), schema=["uuid", "group"]
+        )
 
         new_pairs = (
             ts.select("uuid", "group").distinct()

@@ -1,0 +1,143 @@
+"""Derived metric formulas for the converter stage.
+
+The demo pipeline computes derived engineering metrics before unpivoting so the
+metrics land in bronze/gold as normal channels. Formulas mirror
+CO_energystacck.src.backend.data_enrichment.DataEnrichment.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional, Tuple
+
+import polars as pl
+
+from converter_utils import logger
+
+ACTIVE_AREA_CM2 = 88.0
+FARADAY_CONST = 96485.3
+VM_STP = 22.414
+
+
+def _f64(col_id: str) -> pl.Expr:
+    return pl.col(col_id).cast(pl.Float64, strict=False)
+
+
+def _safe_str(float_expr: pl.Expr) -> pl.Expr:
+    cleaned = float_expr.fill_nan(None)
+    return pl.when(cleaned.is_infinite()).then(None).otherwise(cleaned).cast(pl.String)
+
+
+def apply_derived_metrics(
+    df: pl.DataFrame,
+    columns: List[str],
+    row1_channel: List[str],
+    row2_channel_name: List[str],
+    units: List[str],
+) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
+    """Append Dash-compatible derived metrics to a wide converter DataFrame.
+
+    Input lookup uses canonical display names in `row2_channel_name`; therefore
+    mapping must run before this function. Missing inputs skip the formula.
+    Outputs are strings so the existing unpivot cast chain produces `value` and
+    `value_str` consistently.
+    """
+    name_to_col = {name.strip().lower(): col for name, col in zip(row2_channel_name, columns)}
+    original_column_count = len(columns)
+
+    def req(*canonical_names: str) -> Optional[List[str]]:
+        result = []
+        for name in canonical_names:
+            col_id = name_to_col.get(name.lower())
+            if col_id is None:
+                return None
+            result.append(col_id)
+        return result
+
+    def add(col_name: str, unit: str, expr: pl.Expr) -> None:
+        nonlocal df, columns, row1_channel, row2_channel_name, units
+        if col_name in df.columns:
+            logger.debug(f"    Derived '{col_name}' already exists as raw column - skipped")
+            return
+        try:
+            df = df.with_columns(_safe_str(expr).alias(col_name))
+            columns = columns + [col_name]
+            row1_channel = row1_channel + [col_name]
+            row2_channel_name = row2_channel_name + [col_name]
+            units = units + [unit]
+        except Exception as exc:
+            logger.warning(f"    Derived metric '{col_name}' failed: {exc}")
+
+    ids = req("Faradaic Efficiency of CO", "Stack Voltage")
+    if ids:
+        fe_co_id, stack_voltage_id = ids
+        add("Energy Efficiency", "%", 1.48 * _f64(fe_co_id) / (_f64(stack_voltage_id) / 5.0))
+
+    ids = req("Anolyte inlet pressure", "Anolyte outlet pressure")
+    if ids:
+        inlet_id, outlet_id = ids
+        add("Δp Anolyte", "bar", _f64(inlet_id) - _f64(outlet_id))
+
+    ids = req("Current")
+    if ids:
+        add("Current density", "mA/cm²", 1000.0 * _f64(ids[0]) / ACTIVE_AREA_CM2)
+
+    ids = req("Faradaic Efficiency of CO", "Faradaic Efficiency of H2")
+    if ids:
+        fe_co_id, fe_h2_id = ids
+        add("Faradaic Efficiency of CO and H2", "%", _f64(fe_co_id) + _f64(fe_h2_id))
+
+    ids = req("Faradaic Efficiency of CO", "Current")
+    if ids:
+        fe_co_id, current_id = ids
+        add(
+            "Flow CO out",
+            "nL/min",
+            (_f64(fe_co_id) / 100.0 * _f64(current_id) / (2.0 * FARADAY_CONST)) * VM_STP * 60.0,
+        )
+
+    ids = req("Faradaic Efficiency of H2", "Current")
+    if ids:
+        fe_h2_id, current_id = ids
+        add(
+            "Flow H2 out",
+            "nL/min",
+            (_f64(fe_h2_id) / 100.0 * _f64(current_id) / (2.0 * FARADAY_CONST)) * VM_STP * 60.0,
+        )
+
+    ids = req("Faradaic Efficiency of O2", "Current")
+    if ids:
+        fe_o2_id, current_id = ids
+        add(
+            "Flow O2 out",
+            "nL/min",
+            (_f64(fe_o2_id) / 100.0 * _f64(current_id) / (4.0 * FARADAY_CONST)) * VM_STP * 60.0,
+        )
+
+    ids = req("Cathode inlet CO2 gas flow")
+    if ids and "Flow CO out" in df.columns:
+        add("Flow CO2 out, total", "nL/min", _f64(ids[0]) - _f64("Flow CO out"))
+
+    ids = req("CO2:O2 ratio in anode product gas")
+    if ids and "Flow O2 out" in df.columns:
+        ratio = _f64(ids[0]) / 100.0
+        add("Flow CO2 out, anode", "nL/min", (ratio * _f64("Flow O2 out")) / (1.0 - ratio))
+
+    if "Flow CO2 out, total" in df.columns and "Flow CO2 out, anode" in df.columns:
+        add("Flow CO2 out, cathode", "nL/min", _f64("Flow CO2 out, total") - _f64("Flow CO2 out, anode"))
+
+    if "Flow CO out" in df.columns and "Flow H2 out" in df.columns:
+        add("CO/H2 ratio recalculated", "", _f64("Flow CO out") / _f64("Flow H2 out"))
+
+    ids = req("Faradaic Efficiency of CO", "Current", "Cathode inlet CO2 gas flow")
+    if ids:
+        fe_co_id, current_id, co2_id = ids
+        feco = _f64(fe_co_id) / 100.0
+        co_formation_rate = _f64(current_id) * feco / (2.0 * FARADAY_CONST)
+        co2_inflow_rate = (_f64(co2_id) / 60.0 / 5.0) / VM_STP
+        add("Single Pass Conversion Efficiency", "%", 100.0 * co_formation_rate / co2_inflow_rate)
+
+    added_count = len(columns) - original_column_count
+    if added_count:
+        logger.info(f"    Derived metrics added: {added_count}")
+
+    return df, columns, row1_channel, row2_channel_name, units
