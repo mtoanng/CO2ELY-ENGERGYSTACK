@@ -88,7 +88,7 @@ LAYER_VARIABLES = {
     "_0_convert": {"read_layer": "raw", "write_layer": "raw"},
     "_1_r2b": {"read_layer": "raw", "write_layer": "bronze"},
     "_2_b2s": {"read_layer": "bronze", "write_layer": "silver"},
-    "_3_s2g": {"read_layer": "silver", "write_layer": "gold"},
+    "_3_s2g": {"read_layer": "bronze", "write_layer": "gold"},  # demo: skip silver
 }
 
 

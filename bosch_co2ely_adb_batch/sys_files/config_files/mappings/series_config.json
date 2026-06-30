@@ -1,0 +1,7 @@
+{
+  "_comment": "Maps ADLS source folder name (first path component of relative_path) to its channel mapping file. To add a new series, add an entry here and create the corresponding mapping JSON in this folder.",
+  "PoC Stack II": "PoCII_mapping.json",
+  "PoC Stack III": "PoCIII_mapping.json",
+  "PoC Stack IV": "PoCIV_mapping.json",
+  "PoC Stack VI": "PoCVI_mapping.json"
+}

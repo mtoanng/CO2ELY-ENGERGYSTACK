@@ -29,15 +29,7 @@ common_gold_job_settings: &common_gold_job_settings
           product_department_team: "ELY"
           project: "CO_energystack"
   tasks:
-    - task_key: tsk_co2_gold_summary
-      job_cluster_key: "job_cluster"
-      spark_python_task:
-        python_file: ../src/_3_s2g/gold_summary_statistics.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
+    # tsk_co2_gold_summary (reads silver enriched) -- skipped for demo
 
     - task_key: tsk_co2_gold_timeseries
       job_cluster_key: "job_cluster"

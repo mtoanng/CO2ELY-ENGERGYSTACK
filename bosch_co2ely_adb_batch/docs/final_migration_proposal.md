@@ -190,6 +190,55 @@ The following local app behavior must be preserved and proven with parity fixtur
 
 The frontend must not become the source of truth for scientific calculations, DQ decisions, official aggregation, or canonical analytical facts.
 
+## Business Logic Coverage Check
+
+The Databricks migration must preserve the following original Dash transformation semantics:
+
+| Original behavior | Source implementation | Databricks target |
+| --- | --- | --- |
+| Worksheet loading with saved `header_row` and `first_data_row` | `load_and_concat_files_and_worksheets()` | Converter or metadata-driven parser configuration. |
+| Multi-file and multi-worksheet elapsed-time continuity | `load_and_concat_files_and_worksheets()` | Row context plus continuity rule output; unresolved offsets become issue rows. |
+| Mapping from raw file columns to canonical names | `apply_mapping()` | Governed mapping version applied to raw channel metadata and facts. |
+| `Date` + `Time` to `Timestamp` | `apply_mapping()` and converter `_merge_datetime_columns()` | Converter row context where possible; silver validates parse status. |
+| Numeric coercion after mapping | `DataEnrichment.clean_data()` | Typed values plus parse status; do not silently lose raw values. |
+| Energy Efficiency | `DataEnrichment.add_energy_efficiency()` | Versioned row-wise formula using `Faradaic Efficiency of CO` and `Stack Voltage`. |
+| Delta-p Anolyte | `DataEnrichment.add_delta_p_anolyte()` | Versioned row-wise formula using anolyte inlet and outlet pressure. |
+| Current density | `DataEnrichment.add_current_density()` | Versioned row-wise formula using governed stack active area. |
+| Single Pass Conversion Efficiency | `DataEnrichment.add_single_pass_conversion_efficiency()` | Versioned row-wise formula using original constants `F = 96485.3` and `Vm = 22.414`. |
+| Percent clipping | `DataEnrichment.apply_plausibility_limits()` | Generic plausibility rules with original value, adjusted value, action, and severity. |
+| Aggregation | `DataEnrichment.aggregate_timeseries()` | Gold min/max/mean/count by elapsed-time bins, excluding structural time fields. |
+| Tags | `TagManager.apply_tags()` | Metadata-driven classification; first matching category wins; prefer `{source}_mean` for aggregated data. |
+| Chart gaps | `insert_nan_gaps()` | UI/API presentation behavior for line continuity, not canonical analytical data. |
+
+## Performance-First Semantic Processing
+
+Long format is the preferred canonical storage and query contract, but it should not force inefficient physical execution for row-wise calculations.
+
+The efficient pattern is:
+
+1. Parse each file or worksheet once in the converter.
+2. Extract row context for timestamp and elapsed-time fields.
+3. Apply channel roles and, where metadata is available, mapping snapshots close to the parsed data.
+4. Build a narrow row-wise calculation frame for the metrics needed by formulas and plausibility checks.
+5. Compute row-wise KPIs and rule outcomes on that frame.
+6. Publish canonical long facts for storage, DQ traceability, and gold aggregation.
+
+This avoids repeated self-joins over long facts for formulas such as Energy Efficiency and SPCE.
+
+Recommended physical shapes:
+
+| Shape | Purpose |
+| --- | --- |
+| `bronze_row_context` | One row per source row with timestamp, elapsed time, parse status, and lineage. |
+| `bronze_signal_long` | Signal-only long raw facts for durable evidence and scalable ingestion. |
+| `silver_calculation_frame` or transient dataframe | Row-wise mapped columns needed for formulas and plausibility rules. This may be wide, struct-based, or map-based. |
+| `silver_fact_measurement_long` | Canonical governed source and calculated metric facts. |
+| `gold_timeseries_*` | Query-optimized report-serving aggregations. |
+
+Mapping raw channels to governed metric IDs is generally cheap in long format because it is a metadata join. KPI formulas are not cheap if implemented as repeated long-table self-joins. Plausibility rules are efficient in long format when implemented as a metric-rule join, but preserving adjusted values may be simpler while the calculation frame is still row-wise.
+
+Therefore, silver should own governed semantics, but it does not have to execute every semantic operation against a fully long physical table. Use the cheapest correct physical representation for each step, then publish the governed long contract.
+
 ## Migration Plan
 
 ### Phase 0: Freeze Current Behavior
@@ -230,12 +279,14 @@ Exit criteria:
 
 ### Phase 2: Introduce Governed Silver
 
-Objective: move local Pandas semantics into Databricks as governed canonical facts.
+Objective: move local Pandas semantics into Databricks as governed canonical facts while using efficient physical execution.
 
 Deliverables:
 
 - `silver_dim_metric`, `silver_dim_series`, and `silver_dim_mapping` snapshots.
-- `silver_fact_measurement_long` built from bronze and mapping metadata.
+- Channel-to-metric mapping applied without repeated full-table scans.
+- A row-wise `silver_calculation_frame` or transient equivalent for formula inputs.
+- `silver_fact_measurement_long` built from bronze, mapping metadata, source values, and calculated values.
 - Formula implementation for Energy Efficiency, Delta-p Anolyte, Current density, and SPCE.
 - Formula versions stamped on derived facts.
 - Canonical `silver_measurement_quality` model.
@@ -247,6 +298,7 @@ Exit criteria:
 - KPI outputs match local app fixture outputs within agreed numeric tolerances.
 - Mapping version and formula version are traceable from facts.
 - DQ outcomes are queryable and evidence-preserving.
+- Row-wise KPI formulas do not require repeated self-joins over the canonical long fact table.
 - Silver can feed raw/1min/15min gold without local CSV logic.
 
 ### Phase 3: Publish Gold Reporting Contracts
@@ -311,13 +363,14 @@ Build the smallest slice that proves the final architecture end to end:
 1. Harden current bronze contract enough to preserve file, worksheet/group, channel, sample, raw value, parsed value, and run lineage.
 2. Split converter output into row context for timestamp/elapsed-time fields and signal-only long measurements.
 3. Create minimal metric and mapping snapshots for one representative series.
-4. Build canonical silver measurement facts for that series.
+4. Build an efficient mapped calculation frame for that series.
 5. Port the four local KPI formulas into silver and verify parity against local outputs.
-6. Publish raw, one-minute, and fifteen-minute gold tables for the selected series.
-7. Add a simple API query for one Standard Report, such as Voltage.
-8. Validate the returned data against current Dash report behavior.
+6. Publish canonical silver long facts for source and calculated metrics.
+7. Publish raw, one-minute, and fifteen-minute gold tables for the selected series.
+8. Add a simple API query for one Standard Report, such as Voltage.
+9. Validate the returned data against current Dash report behavior.
 
-This slice avoids premature Timescale, Redis, Arrow Flight SQL, unnecessary medallion handoffs, and a full frontend rewrite while proving the essential migration architecture.
+This slice avoids premature Timescale, Redis, Arrow Flight SQL, unnecessary medallion handoffs, repeated long-table formula self-joins, and a full frontend rewrite while proving the essential migration architecture.
 
 ## Acceptance Gates
 

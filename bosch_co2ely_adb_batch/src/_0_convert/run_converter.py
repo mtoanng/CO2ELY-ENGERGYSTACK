@@ -42,6 +42,7 @@ import sys
 import json
 import time
 import argparse
+import functools
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Iterator, List
@@ -64,6 +65,45 @@ if _SRC_DIR not in sys.path:
 
 # Module-level import required for _process_single_file (called via addPyFile workers)
 from converter_utils import build_abfss_path
+
+
+# =============================================================================
+# SERIES MAPPING LOADER
+# =============================================================================
+
+def _load_series_mapping() -> dict:
+    """Load channel mapping configs keyed by ADLS series folder name.
+
+    Reads sys_files/config_files/mappings/series_config.json which maps
+    folder names (first path component of relative_path) to JSON mapping
+    files in the same directory.  Returns {} if config is missing.
+
+    Returns:
+        {"PoC Stack VI": [{"file_column": ..., "schema_column": ...}, ...], ...}
+    """
+    repo_root = Path(_SRC_DIR).parent
+    mappings_dir = repo_root / "sys_files" / "config_files" / "mappings"
+    series_config_path = mappings_dir / "series_config.json"
+
+    if not series_config_path.exists():
+        from converter_utils import logger as _log
+        _log.warning(f"Series config not found at {series_config_path}. Mapping disabled.")
+        return {}
+
+    from converter_utils import logger as _log
+    series_config: dict = json.loads(series_config_path.read_text(encoding="utf-8"))
+    result: dict = {}
+    for folder_name, mapping_file in series_config.items():
+        if folder_name.startswith("_"):  # skip comment keys
+            continue
+        mapping_path = mappings_dir / mapping_file
+        if mapping_path.exists():
+            entries = json.loads(mapping_path.read_text(encoding="utf-8"))
+            result[folder_name] = entries
+            _log.info(f"  Mapping loaded: '{folder_name}' <- {mapping_file} ({len(entries)} entries)")
+        else:
+            _log.warning(f"  Mapping file not found: {mapping_path}")
+    return result
 
 
 # =============================================================================
@@ -160,6 +200,7 @@ def _process_single_file(
     generate_file_uuid,
     sanitize_name,
     logger,
+    series_mapping: dict = None,
 ) -> Row:
     """Process a single file: download → parse → write Parquet → return result Row.
 
@@ -203,8 +244,13 @@ def _process_single_file(
             # Full abfss:// path for filemeta.file_path (downstream traceability)
             abfss_path = build_abfss_path(row.storage_account, row.container, blob_path)
 
+            # Resolve channel mapping for this series (first folder of relative_path)
+            series_name = relative_path.split("/")[0].strip() if "/" in relative_path else ""
+            mapping = (series_mapping or {}).get(series_name, [])
+
             if extension in (".xlsx", ".xls"):
-                results = convert_xlsx(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
+                results = convert_xlsx(file_bytes, relative_path, file_size, last_modified,
+                                       abfss_file_path=abfss_path, mapping=mapping)
             # elif extension == ".csv":
             #     results = convert_csv(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
             else:
@@ -274,7 +320,7 @@ def _process_single_file(
 # WORKER FUNCTION (runs inside mapPartitions on executors)
 # =============================================================================
 
-def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
+def _process_partition(rows: Iterator[Row], series_mapping: dict = None) -> Iterator[Row]:
     """Process a partition of files on a Spark worker.
 
     Creates a single SDK client and ParquetWriter per partition, then processes
@@ -327,6 +373,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
         yield _process_single_file(
             rows_list[0], container_client, writer,
             convert_xlsx, generate_file_uuid, sanitize_name, logger,
+            series_mapping,
         )
     else:
         # Multiple files — use ThreadPoolExecutor
@@ -336,6 +383,7 @@ def _process_partition(rows: Iterator[Row]) -> Iterator[Row]:
                     _process_single_file,
                     row, container_client, writer,
                     convert_xlsx, generate_file_uuid, sanitize_name, logger,
+                    series_mapping,
                 ): row
                 for row in rows_list
             }
@@ -497,7 +545,12 @@ def main():
     distributed_df = input_df.repartition(num_partitions)
 
     # --- 4. Execute distributed conversion ---
-    results_rdd = distributed_df.rdd.mapPartitions(_process_partition)
+    # Load series->mapping config on driver; bake into worker closure via partial.
+    # The mapping dict is small (KB) and serialized with the closure automatically.
+    series_mapping = _load_series_mapping()
+    logger.info(f"Series mappings loaded: {len(series_mapping)} series configured")
+    process_partition = functools.partial(_process_partition, series_mapping=series_mapping)
+    results_rdd = distributed_df.rdd.mapPartitions(process_partition)
     results_df = spark.createDataFrame(results_rdd, schema=RESULT_SCHEMA)
 
     # Force execution and cache for reporting
