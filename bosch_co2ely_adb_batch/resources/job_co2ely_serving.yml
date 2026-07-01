@@ -1,0 +1,113 @@
+# Gold serving tables: experiment index, channel catalog, multi-resolution agg.
+# Runs AFTER gold_timeseries_view (depends on gold_timeseries + gold_timeseries_agg).
+
+common_serving_job_settings: &common_serving_job_settings
+  parameters:
+    - name: "is_integration_test"
+      default: "false"
+    - name: "env"
+      default: ${bundle.environment}
+  permissions:
+    - group_name: "idm2bcd_dssi03prod_co2elyd_data"
+      level: "CAN_MANAGE"
+  max_concurrent_runs: 1
+  job_clusters:
+    - job_cluster_key: job_cluster
+      new_cluster:
+        policy_id: ${var.scaled_job_cluster_policy_id}
+        spark_version: ${var.spark_version}
+        node_type_id: ${var.scaled_node_type}
+        driver_node_type_id: ${var.scaled_driver_type}
+        data_security_mode: SINGLE_USER
+        autoscale:
+          min_workers: 1
+          max_workers: 4
+        azure_attributes:
+          availability: "SPOT_WITH_FALLBACK_AZURE"
+          first_on_demand: 1
+          spot_bid_max_price: -1
+        custom_tags:
+          product_department_team: "ELY"
+          project: "CO_energystack"
+  tasks:
+    - task_key: tsk_serving_tables
+      run_if: "ALL_SUCCESS"
+      job_cluster_key: job_cluster
+      spark_python_task:
+        python_file: ../src/_3_s2g/gold_serving_tables.py
+        parameters:
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
+
+    - task_key: tsk_summary_statistics
+      run_if: "ALL_SUCCESS"
+      depends_on:
+        - task_key: tsk_serving_tables
+      job_cluster_key: job_cluster
+      spark_python_task:
+        python_file: ../src/_3_s2g/gold_summary_statistics.py
+        parameters:
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
+
+targets:
+  dev_user:
+    resources:
+      jobs:
+        job_co2ely_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_serving
+
+        job_co2ely_int_test_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_int_test_serving
+
+  dev:
+    resources:
+      jobs:
+        job_co2ely_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_serving
+
+  qa:
+    resources:
+      jobs:
+        job_co2ely_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_serving
+
+  prod:
+    resources:
+      jobs:
+        job_co2ely_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_serving
+          email_notifications:
+            on_failure:
+              - got4hc@bosch.com
+            no_alert_for_skipped_runs: true
+
+  dev_integration_test:
+    resources:
+      jobs:
+        job_co2ely_int_test_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_int_test_serving
+
+  qa_integration_test:
+    resources:
+      jobs:
+        job_co2ely_int_test_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_int_test_serving
+
+  prod_integration_test:
+    resources:
+      jobs:
+        job_co2ely_int_test_serving:
+          <<: *common_serving_job_settings
+          name: job_co2ely_int_test_serving

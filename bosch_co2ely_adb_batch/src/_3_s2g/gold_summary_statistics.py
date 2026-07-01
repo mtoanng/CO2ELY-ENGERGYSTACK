@@ -43,18 +43,18 @@ def main():
     env = env_variables(spark, env_override=args.env)
     environment = env["environment"]
     catalog = env["unity_catalog"]
-    read_medal = medallion_variables("silver", environment)
     write_medal = medallion_variables("gold", environment)
     adls_domain = env.get("adls_domain") or ""
     storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
     logger.info(f"Environment: {environment}")
 
+    # Read from gold_timeseries (has series column + derived metric channels)
     source_table = build_table_name(
         unity_catalog=catalog,
-        schema=read_medal["uc_schema"],
-        prefix=read_medal["table_prefix"],
-        table="fact_timeseries_enriched",
+        schema=write_medal["uc_schema"],
+        prefix=write_medal["table_prefix"],
+        table="timeseries",
         is_integration_test=args.is_integration_test,
     )
     target_table = build_table_name(
@@ -68,16 +68,20 @@ def main():
     logger.info(f"Reading from: {source_table}")
     df = spark.read.table(source_table)
 
-    df_summary = df.agg(
+    # Per-experiment summary: one row per (series, uuid, group)
+    df_summary = df.groupBy("series", "uuid", "group").agg(
         F.count("*").alias("total_data_points"),
-        F.avg(F.when(F.col("std_channel") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
-        F.max(F.when(F.col("std_channel") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
-        F.avg(F.when(F.col("std_channel") == "Energy Efficiency", F.col("value"))).alias("avg_energy_efficiency_pct"),
-        F.avg(F.when(F.col("std_channel") == "Faradaic Efficiency of CO", F.col("value"))).alias("avg_fe_co_pct"),
-        F.avg(F.when(F.col("std_channel") == "Faradaic Efficiency of H2", F.col("value"))).alias("avg_fe_h2_pct"),
-        F.avg(F.when(F.col("std_channel") == "Single Pass Conversion Efficiency", F.col("value"))).alias("avg_spce_pct"),
-        F.min("elapsed_time").alias("start_time_s"),
-        F.max("elapsed_time").alias("end_time_s"),
+        F.avg(F.when(F.col("channel_name") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
+        F.max(F.when(F.col("channel_name") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
+        F.avg(F.when(F.col("channel_name") == "Energy Efficiency", F.col("value"))).alias("avg_energy_efficiency_pct"),
+        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of CO", F.col("value"))).alias("avg_fe_co_pct"),
+        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of H2", F.col("value"))).alias("avg_fe_h2_pct"),
+        F.avg(F.when(F.col("channel_name") == "Single Pass Conversion Efficiency", F.col("value"))).alias("avg_spce_pct"),
+        F.min("elapsed_time_s").alias("start_time_s"),
+        F.max("elapsed_time_s").alias("end_time_s"),
+        F.countDistinct("channel").alias("channel_count"),
+    ).withColumn(
+        "duration_s", F.col("end_time_s") - F.col("start_time_s")
     )
 
     logger.info("Computed summary statistics")
