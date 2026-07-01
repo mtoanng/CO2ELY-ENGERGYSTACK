@@ -53,65 +53,68 @@ def _merge_datetime_columns(
     row1_channel: List[str],
     row2_channel_name: List[str],
     units: List[str],
+    mapping: Optional[List[dict]] = None,
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
-    """Detect and merge split date+time columns from merged 'Real time' header.
+    """Detect and merge split date+time columns into a canonical timestamp channel.
 
-    Excel stores dates as serial numbers and times as day-fractions internally.
-    When a merged header spans 2 columns (one date, one time), calamine converts:
-      - Date serial (e.g. 46031 for "2/14/2026") -> "2026-02-14 00:00:00"
-      - Time fraction (e.g. 0.41768 for "10:01:27 AM") -> "1899-12-31 10:01:27"
-
-    The "1899-12-31" prefix and "00:00:00" suffix are calamine artifacts from
-    interpreting Excel's internal numeric representation, NOT actual data.
-
-    This function combines them into a single "timestamp" column:
-      "2026-02-14 00:00:00" + "1899-12-31 10:01:27" -> "2026-02-14 10:01:27"
-
-    Channel metadata:
-      - channel (row1) = "timestamp"
-      - channel_name (row2) = preserved from the original first column header
-
-    Args:
-        df: DataFrame with string columns (post-rename, pre-unpivot).
-        columns: List of column names (from rename_map).
-        row1_channel: Channel identifiers for build_channel().
-        row2_channel_name: Display names for build_channel().
-        units: Unit strings for build_channel().
-
-    Returns:
-        Tuple of (modified_df, columns, row1_channel, row2_channel_name, units)
-        with the time column removed and date column replaced by timestamp.
-        Returns inputs unchanged if no merge pattern detected.
+    Prefer explicit mapping entries where schema_column is Date/Time. If those
+    are unavailable, fall back to the legacy "Real time" + adjacent unnamed
+    column heuristic.
     """
-    # Find "Real time" column index. Some files keep that label in row 1 while
-    # row 2 has a friendlier display name such as "Measurement Time".
-    rt_idx = None
-    for i, (row1, row2, col) in enumerate(zip(row1_channel, row2_channel_name, columns)):
-        if any(_REALTIME_PATTERN.match(str(value).strip()) for value in (row1, row2, col)):
-            rt_idx = i
-            break
+    def norm(value: object) -> str:
+        return str(value or "").strip().lower()
 
-    if rt_idx is None or rt_idx + 1 >= len(columns):
-        return df, columns, row1_channel, row2_channel_name, units
+    def find_column_index(file_column: str) -> Optional[int]:
+        target = norm(file_column)
+        if not target:
+            return None
+        for idx, values in enumerate(zip(columns, row1_channel, row2_channel_name)):
+            if target in {norm(value) for value in values}:
+                return idx
+        return None
 
-    date_col = columns[rt_idx]
-    time_col = columns[rt_idx + 1]
+    date_idx = None
+    time_idx = None
+    if mapping:
+        for entry in mapping:
+            schema_col = norm(entry.get("schema_column"))
+            file_col = str(entry.get("file_column") or "")
+            if schema_col == "date":
+                date_idx = find_column_index(file_col)
+            elif schema_col == "time":
+                time_idx = find_column_index(file_col)
 
-    # Verify the next column is the split partner, not a real named signal.
-    next_values = [
-        str(columns[rt_idx + 1]).strip(),
-        str(row1_channel[rt_idx + 1]).strip(),
-        str(row2_channel_name[rt_idx + 1]).strip(),
-    ]
-    is_split_partner = any(
-        not value
-        or value.lower().startswith("unnamed")
-        or value.lower().startswith("column_")
-        or re.match(r"^real\s*time(_\d+)?$", value, re.IGNORECASE)
-        for value in next_values
-    )
-    if not is_split_partner:
-        return df, columns, row1_channel, row2_channel_name, units
+    used_mapping = date_idx is not None and time_idx is not None
+    if not used_mapping:
+        # Find "Real time" column index. Some files keep that label in row 1 while
+        # row 2 has a friendlier display name such as "Measurement Time".
+        for idx, (row1, row2, col) in enumerate(zip(row1_channel, row2_channel_name, columns)):
+            if any(_REALTIME_PATTERN.match(str(value).strip()) for value in (row1, row2, col)):
+                date_idx = idx
+                break
+
+        if date_idx is None or date_idx + 1 >= len(columns):
+            return df, columns, row1_channel, row2_channel_name, units
+        time_idx = date_idx + 1
+
+        # Verify the next column is the split partner, not a real named signal.
+        next_values = [
+            str(columns[time_idx]).strip(),
+            str(row1_channel[time_idx]).strip(),
+            str(row2_channel_name[time_idx]).strip(),
+        ]
+        is_split_partner = any(
+            not value
+            or value.lower().startswith("unnamed")
+            or value.lower().startswith("column_")
+            or re.match(r"^real\s*time(_\d+)?$", value, re.IGNORECASE)
+            for value in next_values
+        )
+        if not is_split_partner:
+            return df, columns, row1_channel, row2_channel_name, units
+
+    date_col = columns[date_idx]
+    time_col = columns[time_idx]
 
     # Peek at first few non-null values to confirm calamine date/time pattern.
     # If both columns are entirely null, still merge structurally so downstream
@@ -164,24 +167,23 @@ def _merge_datetime_columns(
         ).alias("timestamp")
     )
 
-    # Drop the original two columns, replace with "timestamp"
+    # Drop the original two columns, replace them with a deterministic
+    # timestamp channel at the earlier of the two positions.
     df = df.drop([date_col, time_col])
+    timestamp_idx = min(date_idx, time_idx)
+    removed_indices = {date_idx, time_idx}
 
-    # Update metadata lists: remove time_col entry, rename date_col to "timestamp"
-    # Preserve original channel_name from the first column (row 2 header)
-    original_channel_name = row2_channel_name[rt_idx]
+    new_columns = [c for i, c in enumerate(columns) if i not in removed_indices]
+    new_columns.insert(timestamp_idx, "timestamp")
 
-    new_columns = [c for c in columns if c != date_col and c != time_col]
-    new_columns.insert(rt_idx, "timestamp")
+    new_row1 = [ch for i, ch in enumerate(row1_channel) if i not in removed_indices]
+    new_row1.insert(timestamp_idx, "timestamp")
 
-    new_row1 = [ch for i, ch in enumerate(row1_channel) if i != rt_idx and i != rt_idx + 1]
-    new_row1.insert(rt_idx, "timestamp")
+    new_row2 = [name for i, name in enumerate(row2_channel_name) if i not in removed_indices]
+    new_row2.insert(timestamp_idx, "timestamp")
 
-    new_row2 = [n for i, n in enumerate(row2_channel_name) if i != rt_idx and i != rt_idx + 1]
-    new_row2.insert(rt_idx, original_channel_name)
-
-    new_units = [u for i, u in enumerate(units) if i != rt_idx and i != rt_idx + 1]
-    new_units.insert(rt_idx, "")
+    new_units = [unit for i, unit in enumerate(units) if i not in removed_indices]
+    new_units.insert(timestamp_idx, "")
 
     # Reorder DataFrame columns to match new_columns
     df = df.select(new_columns)
@@ -276,9 +278,10 @@ def _process_sheet(
     df = df.rename(rename_map)
     columns = list(rename_map.values())
 
-    # --- Merge split "Real time" date+time columns (calamine edge case) ---
+    # --- Merge split date+time columns into canonical timestamp ---
+    # Prefer Date/Time mapping entries; fall back to Real-time heuristics.
     df, columns, row1_channel, row2_channel_name, units = _merge_datetime_columns(
-        df, columns, row1_channel, row2_channel_name, units
+        df, columns, row1_channel, row2_channel_name, units, mapping=mapping
     )
 
     n_rows = df.shape[0]
