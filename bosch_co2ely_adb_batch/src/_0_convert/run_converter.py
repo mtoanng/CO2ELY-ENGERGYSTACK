@@ -444,12 +444,19 @@ def main():
     # Skip files that have exceeded max total retries (permanently broken)
     if new_blobs:
         try:
-            paths_sql = ",".join(f"'{b.blob_path}'" for b in new_blobs)
-            exhausted = spark.sql(
-                f"SELECT blob_path FROM {tracking_table} "
-                f"WHERE status = 'FAILED' AND retry_count >= {MAX_TOTAL_RETRIES} "
-                f"AND blob_path IN ({paths_sql})"
-            ).collect()
+            candidate_paths_df = spark.createDataFrame(
+                [Row(blob_path=b.blob_path) for b in new_blobs]
+            ).dropDuplicates(["blob_path"])
+            candidate_paths_df.createOrReplaceTempView("_converter_candidate_paths")
+            exhausted = spark.sql(f"""
+                SELECT t.blob_path
+                FROM {tracking_table} t
+                INNER JOIN _converter_candidate_paths c
+                    ON t.blob_path = c.blob_path
+                WHERE t.status = 'FAILED'
+                  AND t.retry_count >= {MAX_TOTAL_RETRIES}
+            """).collect()
+            spark.catalog.dropTempView("_converter_candidate_paths")
             exhausted_paths = {r.blob_path for r in exhausted}
             if exhausted_paths:
                 logger.warning(f"Skipping {len(exhausted_paths)} file(s) that exceeded "

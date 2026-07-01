@@ -22,7 +22,7 @@ except NameError:
     _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
 sys.path.insert(0, str(_THIS_DIR.parent))
 
-from pyspark.sql import SparkSession, functions as F
+from pyspark.sql import SparkSession, DataFrame, functions as F
 
 from _2_b2s.dq_engine import DEFAULT_TIMESERIES_RULES, evaluate_rules, summarize_failures
 from _5_common.common_utils import (
@@ -59,15 +59,7 @@ def _select_invalid_keys(failures, apply_to_blocking_only: bool):
 
 
 def apply_is_valid_flags(spark, source_table: str, invalid_keys):
-    """Mark silver fact rows as valid/invalid based on DQ failures."""
-    invalid_count = invalid_keys.count()
-
-    logger.info(f"Invalid row keys identified for annotation: {invalid_count}")
-    spark.sql(f"UPDATE {source_table} SET is_valid = true")
-
-    if invalid_count == 0:
-        return invalid_count
-
+    """Mark invalid rows from the current DQ batch without rewriting history."""
     invalid_keys.createOrReplaceTempView("_silver_invalid_timeseries_keys")
     spark.sql(f"""
         MERGE INTO {source_table} t
@@ -80,17 +72,10 @@ def apply_is_valid_flags(spark, source_table: str, invalid_keys):
             is_valid = false
     """)
     spark.catalog.dropTempView("_silver_invalid_timeseries_keys")
-    return invalid_count
 
 
 def delete_invalid_rows(spark, source_table: str, invalid_keys):
-    """Delete invalid fact rows from the source table in place."""
-    invalid_count = invalid_keys.count()
-    logger.info(f"Invalid row keys identified for deletion: {invalid_count}")
-
-    if invalid_count == 0:
-        return invalid_count
-
+    """Delete invalid fact rows from the current DQ batch in place."""
     invalid_keys.createOrReplaceTempView("_silver_invalid_timeseries_keys")
     spark.sql(f"""
         MERGE INTO {source_table} t
@@ -102,7 +87,6 @@ def delete_invalid_rows(spark, source_table: str, invalid_keys):
         WHEN MATCHED THEN DELETE
     """)
     spark.catalog.dropTempView("_silver_invalid_timeseries_keys")
-    return invalid_count
 
 
 def build_clean_timeseries_df(df, invalid_keys):
@@ -119,6 +103,8 @@ def main():
     """Main entry point for silver timeseries data-quality evaluation."""
     args = get_dq_job_args()
     spark = SparkSession.builder.getOrCreate()
+    spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+    spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
 
     env = env_variables(spark, env_override=args.env)
     environment = env["environment"]
@@ -173,15 +159,42 @@ def main():
         is_integration_test=args.is_integration_test,
     )
 
-    logger.info(f"Reading from: {source_table}")
-    df = spark.read.table(source_table)
-    failures = evaluate_rules(df, DEFAULT_TIMESERIES_RULES).withColumn(
-        "observed_value",
-        F.coalesce(F.col("value_str"), F.col("value").cast("string")),
+    if args.cleanup_mode not in {"annotate", "delete_invalid", "write_clean_table"}:
+        raise ValueError(
+            "Unsupported cleanup_mode. Expected one of: annotate, delete_invalid, write_clean_table"
+        )
+
+    silver_layer = "silver_int_test" if args.is_integration_test else medal["table_prefix"]
+    checkpoint_path = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="_checkpoints/dq_timeseries",
     )
-    summary = summarize_failures(failures)
-    invalid_keys = _select_invalid_keys(failures, args.apply_to_blocking_only)
-    logger.info(f"DQ rules evaluated: {len(DEFAULT_TIMESERIES_RULES)}")
+    result_location = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="fact_timeseries_dq_result",
+    )
+    summary_location = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="fact_timeseries_dq_summary",
+    )
+    rule_location = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="dim_dq_rule",
+    )
+    clean_location = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="fact_timeseries_clean",
+    )
 
     rules_df = spark.createDataFrame([
         {
@@ -196,42 +209,50 @@ def main():
         }
         for rule in DEFAULT_TIMESERIES_RULES
     ])
+    write_to_delta(rules_df, rule_table, mode="overwrite", location=rule_location)
+    logger.info(f"Wrote DQ rule dimension -> {rule_table}")
+    logger.info(f"Streaming new rows from: {source_table}")
 
-    output_tables = [
-        (result_table, failures, "fact_timeseries_dq_result"),
-        (summary_table, summary, "fact_timeseries_dq_summary"),
-        (rule_table, rules_df, "dim_dq_rule"),
-    ]
+    def process_batch(batch_df: DataFrame, batch_id: int) -> None:
+        failures = evaluate_rules(batch_df, DEFAULT_TIMESERIES_RULES).withColumn(
+            "observed_value",
+            F.coalesce(F.col("value_str"), F.col("value").cast("string")),
+        ).withColumn("dq_batch_id", F.lit(batch_id))
+        summary = summarize_failures(failures).withColumn("dq_batch_id", F.lit(batch_id))
+        invalid_keys = _select_invalid_keys(failures, args.apply_to_blocking_only)
 
-    if args.cleanup_mode == "write_clean_table":
-        output_tables.append(
-            (clean_table, build_clean_timeseries_df(df, invalid_keys), "fact_timeseries_clean")
-        )
-    elif args.cleanup_mode not in {"annotate", "delete_invalid"}:
-        raise ValueError(
-            "Unsupported cleanup_mode. Expected one of: annotate, delete_invalid, write_clean_table"
-        )
+        write_to_delta(failures, result_table, mode="append", location=result_location)
+        write_to_delta(summary, summary_table, mode="append", location=summary_location)
 
-    for table_name, table_df, entity_name in output_tables:
-        logger.info(f"Writing to: {table_name}")
-        location = build_external_table_location(
-            storage_account=storage_account,
-            container=medal["adls_container"],
-            layer=medal["table_prefix"],
-            table_name=entity_name,
-        )
-        write_to_delta(table_df, table_name, mode="overwrite", location=location)
-        logger.info(f"Wrote {entity_name} -> {table_name}")
+        if args.cleanup_mode == "write_clean_table":
+            clean_df = build_clean_timeseries_df(batch_df, invalid_keys).withColumn("dq_batch_id", F.lit(batch_id))
+            write_to_delta(clean_df, clean_table, mode="append", location=clean_location)
+        elif args.cleanup_mode == "annotate":
+            apply_is_valid_flags(spark, source_table, invalid_keys)
+        elif args.cleanup_mode == "delete_invalid":
+            delete_invalid_rows(spark, source_table, invalid_keys)
 
-    if args.cleanup_mode == "annotate":
-        invalid_count = apply_is_valid_flags(spark, source_table, invalid_keys)
-        logger.info(f"Updated is_valid flags in: {source_table} (invalid rows: {invalid_count})")
-    elif args.cleanup_mode == "delete_invalid":
-        invalid_count = delete_invalid_rows(spark, source_table, invalid_keys)
-        logger.info(f"Deleted invalid rows from: {source_table} (deleted rows: {invalid_count})")
+        logger.info(f"Batch {batch_id}: DQ processing completed")
+
+    query = (
+        spark.readStream
+        .option("skipChangeCommits", "true")
+        .table(source_table)
+        .writeStream
+        .foreachBatch(process_batch)
+        .option("checkpointLocation", checkpoint_path)
+        .trigger(availableNow=True)
+        .start()
+    )
+    query.awaitTermination()
+
+    rows_read = 0
+    if query.lastProgress and query.lastProgress.get("numInputRows"):
+        rows_read = query.lastProgress["numInputRows"]
     else:
-        invalid_count = invalid_keys.count()
-        logger.info(f"Wrote clean-table output with invalid rows excluded: {clean_table} (invalid rows: {invalid_count})")
+        for progress in query.recentProgress or []:
+            rows_read += progress.get("numInputRows", 0)
+    logger.info(f"DQ evaluated {rows_read:,} new source row(s)")
 
 
 if __name__ == "__main__":

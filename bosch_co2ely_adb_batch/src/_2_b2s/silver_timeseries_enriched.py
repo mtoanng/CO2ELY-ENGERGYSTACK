@@ -99,14 +99,16 @@ def build_enriched_timeseries_df(timeseries_df: DataFrame, channel_df: DataFrame
     channel_roles = _detect_channel_roles(channel_df)
 
     joined = timeseries_df.join(
-        channel_roles.select(
-            "uuid",
-            "group",
-            "channel",
-            "channel_name",
-            "unit",
-            "is_event_time_channel",
-            "is_elapsed_time_channel",
+        F.broadcast(
+            channel_roles.select(
+                "uuid",
+                "group",
+                "channel",
+                "channel_name",
+                "unit",
+                "is_event_time_channel",
+                "is_elapsed_time_channel",
+            )
         ),
         on=["uuid", "group", "channel"],
         how="left",
@@ -182,6 +184,8 @@ def build_enriched_timeseries_df(timeseries_df: DataFrame, channel_df: DataFrame
 def main():
     args = get_job_args()
     spark = SparkSession.builder.getOrCreate()
+    spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+    spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
 
     env = env_variables(spark, env_override=args.env)
     environment = env["environment"]

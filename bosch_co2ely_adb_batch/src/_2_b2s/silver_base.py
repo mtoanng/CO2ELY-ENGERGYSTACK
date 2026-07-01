@@ -55,6 +55,9 @@ def _append_table_stream(
     checkpoint_path: str,
 ) -> int:
     """Append only new Bronze Delta commits to the Silver table."""
+    spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+    spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
+
     stream_df = (
         spark.readStream
         .table(source_table)

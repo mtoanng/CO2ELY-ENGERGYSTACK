@@ -97,6 +97,10 @@ def write_to_delta(df, table_name, mode="append", partition_by=None, location=No
         location = build_external_table_location(storage_account, container, "silver", "timeseries")
         write_to_delta(df, "catalog.schema.table", mode="overwrite", location=location)
     """
+    spark = df.sparkSession
+    spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+    spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
+
     writer = df.write.format("delta").mode(mode)
     if partition_by:
         writer = writer.partitionBy(*partition_by)

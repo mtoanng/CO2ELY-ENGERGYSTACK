@@ -13,10 +13,14 @@ Usage (via Databricks job):
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, max as spark_max, min as spark_min, count
+from pyspark.sql import functions as F
 
 from _5_common.common_utils import (
     build_table_name,
@@ -36,56 +40,54 @@ def main():
     args = get_job_args()
     spark = SparkSession.builder.getOrCreate()
 
-    # Resolve environment
     env = env_variables(spark, env_override=args.env)
-    read_layer = layer_variables("_3_s2g")
-    read_medal = medallion_variables(read_layer["read_layer"])
-    write_medal = medallion_variables(read_layer["write_layer"])
+    environment = env["environment"]
+    catalog = env["unity_catalog"]
+    read_medal = medallion_variables("silver", environment)
+    write_medal = medallion_variables("gold", environment)
+    adls_domain = env.get("adls_domain") or ""
+    storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
-    logger.info(f"Environment: {env['environment']}")
+    logger.info(f"Environment: {environment}")
 
-    # Source: silver enriched
     source_table = build_table_name(
-        unity_catalog=env["unity_catalog"],
+        unity_catalog=catalog,
         schema=read_medal["uc_schema"],
         prefix=read_medal["table_prefix"],
-        table="co2_timeseries_enriched",
+        table="fact_timeseries_enriched",
         is_integration_test=args.is_integration_test,
     )
-
-    # Target: gold summary
     target_table = build_table_name(
-        unity_catalog=env["unity_catalog"],
+        unity_catalog=catalog,
         schema=write_medal["uc_schema"],
         prefix=write_medal["table_prefix"],
-        table="co2_summary_statistics",
+        table="summary_statistics",
         is_integration_test=args.is_integration_test,
     )
 
     logger.info(f"Reading from: {source_table}")
     df = spark.read.table(source_table)
 
-    # Compute summary KPIs — mirrors Dash app's summary panel
     df_summary = df.agg(
-        count("*").alias("total_data_points"),
-        avg("Stack Voltage").alias("avg_stack_voltage_v"),
-        spark_max("Current density").alias("peak_current_density_ma_cm2"),
-        avg("Energy Efficiency").alias("avg_energy_efficiency_pct"),
-        avg("Faradaic Efficiency of CO").alias("avg_fe_co_pct"),
-        avg("Faradaic Efficiency of H2").alias("avg_fe_h2_pct"),
-        avg("Single Pass Conversion Efficiency").alias("avg_spce_pct"),
-        spark_min("Elapsed time").alias("start_time_s"),
-        spark_max("Elapsed time").alias("end_time_s"),
+        F.count("*").alias("total_data_points"),
+        F.avg(F.when(F.col("channel_name") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
+        F.max(F.when(F.col("channel_name") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
+        F.avg(F.when(F.col("channel_name") == "Energy Efficiency", F.col("value"))).alias("avg_energy_efficiency_pct"),
+        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of CO", F.col("value"))).alias("avg_fe_co_pct"),
+        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of H2", F.col("value"))).alias("avg_fe_h2_pct"),
+        F.avg(F.when(F.col("channel_name") == "Single Pass Conversion Efficiency", F.col("value"))).alias("avg_spce_pct"),
+        F.min("elapsed_time").alias("start_time_s"),
+        F.max("elapsed_time").alias("end_time_s"),
     )
 
     logger.info("Computed summary statistics")
 
-    # Write to external table
+    gold_layer = "gold_int_test" if args.is_integration_test else write_medal["table_prefix"]
     location = build_external_table_location(
-        storage_account=env["storage_account"],
+        storage_account=storage_account,
         container=write_medal["adls_container"],
-        layer=write_medal["table_prefix"],  # "gold"
-        table_name="summary",
+        layer=gold_layer,
+        table_name="summary_statistics",
     )
     write_to_delta(df_summary, target_table, mode="overwrite", location=location)
     logger.info(f"Successfully wrote to {target_table}")

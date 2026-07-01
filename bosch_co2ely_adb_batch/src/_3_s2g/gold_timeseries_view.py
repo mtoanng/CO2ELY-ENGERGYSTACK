@@ -125,7 +125,7 @@ def _build_gold_timeseries(
         ts_signals
         .join(ts_timestamp, on=["uuid", "group", "sample_offset"], how="left")
         .join(ts_elapsed,   on=["uuid", "group", "sample_offset"], how="left")
-        .join(fm_series,    on="uuid", how="left")
+        .join(F.broadcast(fm_series), on="uuid", how="left")
         .select(
             "series", "uuid", "group", "sample_offset",
             "timestamp", "elapsed_time_s",
@@ -238,6 +238,7 @@ def main():
         logger.info("  Nothing new to write. Exiting.")
         return
 
+    new_pairs = F.broadcast(new_pairs)
     ts = ts.join(new_pairs, on=["uuid", "group"], how="inner")
     ch = ch.join(new_pairs, on=["uuid", "group"], how="inner")
 
@@ -249,13 +250,13 @@ def main():
 
     # --- Join channel metadata onto timeseries rows ---
     ts_with_meta = ts.join(
-        ch.select("uuid", "group", "channel", "channel_name", "unit"),
+        F.broadcast(ch.select("uuid", "group", "channel", "channel_name", "unit")),
         on=["uuid", "group", "channel"],
         how="left",
     )
 
     # --- Build gold_timeseries (long format, signals only) ---
-    gold_ts_df = _build_gold_timeseries(ts_with_meta, fm_series)
+    gold_ts_df = _build_gold_timeseries(ts_with_meta, fm_series).cache()
 
     ts_count = gold_ts_df.count()
     logger.info(f"  gold_timeseries rows (new): {ts_count:,}")
@@ -272,7 +273,7 @@ def main():
     # --- Build gold_timeseries_agg (1-min bins) ---
     gold_agg_df = (
         _build_gold_timeseries_agg(gold_ts_df)
-        .join(done_agg_df, on=["uuid", "group"], how="left_anti")
+        .join(F.broadcast(done_agg_df), on=["uuid", "group"], how="left_anti")
     )
 
     agg_count = gold_agg_df.count()
@@ -285,6 +286,7 @@ def main():
         table_name="timeseries_agg",
     )
     write_to_delta(gold_agg_df, gold_agg_table, mode="append", location=loc_agg)
+    gold_ts_df.unpersist()
     logger.info(f"  Appended -> {gold_agg_table}")
 
 
