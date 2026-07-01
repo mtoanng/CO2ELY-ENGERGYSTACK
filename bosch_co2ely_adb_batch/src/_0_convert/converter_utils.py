@@ -724,11 +724,18 @@ class IncrementalTracker:
         # Cross-check candidates against tracking table (avoid re-processing SUCCESS files)
         processed = set()
         try:
-            paths_sql = ",".join(f"'{c.blob_path}'" for c in candidates)
-            rows = self.spark.sql(
-                f"SELECT blob_path, file_size, last_modified FROM {self.table} "
-                f"WHERE status='SUCCESS' AND blob_path IN ({paths_sql})"
-            ).collect()
+            candidate_paths_df = self.spark.createDataFrame(
+                [(c.blob_path,) for c in candidates], "blob_path STRING"
+            ).dropDuplicates(["blob_path"])
+            candidate_paths_df.createOrReplaceTempView("_tracker_candidate_paths")
+            rows = self.spark.sql(f"""
+                SELECT t.blob_path, t.file_size, t.last_modified
+                FROM {self.table} t
+                INNER JOIN _tracker_candidate_paths c
+                    ON t.blob_path = c.blob_path
+                WHERE t.status = 'SUCCESS'
+            """).collect()
+            self.spark.catalog.dropTempView("_tracker_candidate_paths")
             processed = {(r.blob_path, r.file_size, r.last_modified) for r in rows}
         except Exception:
             pass
