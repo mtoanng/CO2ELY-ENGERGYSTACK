@@ -6,9 +6,9 @@ Produces four tables optimized for the reporting frontend:
                            channel count, sample count, and file metadata.
                            Used for selector dropdowns and quick-view panels.
 
-  gold_channel_catalog    — one row per (series, uuid, group, channel) with
-                           channel_name and unit. Used for axis labels and
-                           channel selector population.
+  gold_channel_catalog    — one row per (series, uuid, group, channel_id) with
+                           raw_channel, std_channel, and unit. Used for axis
+                           labels and channel selector population.
 
   gold_timeseries_agg_15min — 15-minute elapsed-time bins with mean/min/max/count.
                               Coarse tier for overview zoom and initial page load.
@@ -89,7 +89,7 @@ def build_experiment_index(gold_ts: DataFrame, filemeta: DataFrame) -> DataFrame
         F.max("elapsed_time_s").alias("end_time_s"),
         F.min("timestamp").alias("start_timestamp"),
         F.max("timestamp").alias("end_timestamp"),
-        F.countDistinct("channel").alias("channel_count"),
+        F.countDistinct("channel_id").alias("channel_count"),
         F.max("sample_offset").alias("max_sample_offset"),
         F.count("*").alias("total_data_points"),
     ).withColumn(
@@ -110,13 +110,13 @@ def build_experiment_index(gold_ts: DataFrame, filemeta: DataFrame) -> DataFrame
 
 
 def build_channel_catalog(gold_ts: DataFrame) -> DataFrame:
-    """One row per (series, uuid, group, channel) with display metadata.
+    """One row per (series, uuid, group, channel_id) with display metadata.
 
     Enables: channel selectors, axis labels, unit lookups.
     """
     return (
         gold_ts
-        .select("series", "uuid", "group", "channel", "channel_name", "unit")
+        .select("series", "uuid", "group", "channel_id", "raw_channel", "std_channel", "unit")
         .distinct()
     )
 
@@ -133,7 +133,7 @@ def build_agg_from_1min(agg_1min: DataFrame, bin_seconds: int) -> DataFrame:
             "coarse_bin_s",
             (F.floor(F.col("elapsed_bin_s") / bin_seconds) * bin_seconds),
         )
-        .groupBy("series", "uuid", "group", "coarse_bin_s", "channel", "channel_name", "unit")
+        .groupBy("series", "uuid", "group", "coarse_bin_s", "channel_id", "raw_channel", "std_channel", "unit")
         .agg(
             F.first("elapsed_time_s", ignorenulls=True).alias("elapsed_time_s"),
             F.first("timestamp", ignorenulls=True).alias("timestamp"),
