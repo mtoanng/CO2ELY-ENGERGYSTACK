@@ -103,7 +103,8 @@ def build_experiment_index(gold_ts: DataFrame, filemeta: DataFrame) -> DataFrame
         F.col("file_path").alias("source_file_path"),
         F.col("raw_file_name").alias("source_file_name"),
         F.col("file_size").alias("source_file_size"),
-        F.col("_bronze_ingested_at").alias("ingested_at"),
+        F.col("last_modified").alias("source_last_modified"),
+        F.col("_ingestion_timestamp").alias("ingested_at"),
     )
 
     return ts_summary.join(fm, on="uuid", how="left")
