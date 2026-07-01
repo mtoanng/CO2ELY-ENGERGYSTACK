@@ -242,11 +242,10 @@ def main():
     ts = ts.join(new_pairs, on=["uuid", "group"], how="inner")
     ch = ch.join(new_pairs, on=["uuid", "group"], how="inner")
 
-    # --- Extract series from filemeta ---
-    fm_series = fm.withColumn(
-        "series",
-        F.regexp_extract(F.col("file_path"), r"/([^/]+)/[^/]+\.[^/]+$", 1),
-    ).select("uuid", "series")
+    # --- Series is captured at convert time (see xlsx_converter.build_filemeta) ---
+    # using the same governed series_config.json lookup that selects the channel
+    # mapping, instead of re-deriving it here via regex on file_path.
+    fm_series = fm.select("uuid", "series")
 
     # --- Join channel metadata onto timeseries rows ---
     ts_with_meta = ts.join(

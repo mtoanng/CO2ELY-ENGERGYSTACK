@@ -144,6 +144,7 @@ SCHEMAS = {
         ("file_size", pa.int64()),
         ("last_modified", pa.timestamp("us")),
         ("ingested_timestamp", pa.timestamp("us")),
+        ("series", pa.string()),
     ]),
     "channel": pa.schema([
         ("uuid", pa.string()),
@@ -439,6 +440,7 @@ def unpivot_timeseries(
 def build_filemeta(
     file_path: str, file_uuid: str, file_size: int,
     last_modified: Optional[datetime],
+    series: Optional[str] = None,
 ) -> pa.Table:
     """Build filemeta PyArrow table (1 row per file).
 
@@ -447,10 +449,13 @@ def build_filemeta(
         file_uuid: Deterministic UUID for this file.
         file_size: File size in bytes.
         last_modified: Blob last modification timestamp.
+        series: Governed series name resolved from the ADLS source folder
+            during channel-mapping lookup (e.g. "PoC Stack VI"). None if no
+            configured series folder matched the file's relative path.
 
     Returns:
         PyArrow Table with schema: uuid, file_path, raw_file_name, file_size,
-        last_modified, ingested_timestamp.
+        last_modified, ingested_timestamp, series.
     """
     now = datetime.now(tz=timezone.utc)
     return pa.table({
@@ -460,6 +465,7 @@ def build_filemeta(
         "file_size": [file_size],
         "last_modified": [last_modified],
         "ingested_timestamp": [now],
+        "series": [series],
     }, schema=SCHEMAS["filemeta"])
 
 

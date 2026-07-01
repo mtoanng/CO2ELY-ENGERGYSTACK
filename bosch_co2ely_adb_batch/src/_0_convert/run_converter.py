@@ -206,13 +206,13 @@ def _process_single_file(
             # Full abfss:// path for filemeta.file_path (downstream traceability)
             abfss_path = build_abfss_path(row.storage_account, row.container, blob_path)
 
-            # Resolve channel mapping for this series. Integration-test paths can
-            # include extra prefixes, so inspect all relative path components.
-            mapping = resolve_mapping_for_path(relative_path, series_mapping or {})
+            # Resolve channel mapping + series for this file. Integration-test paths
+            # can include extra prefixes, so inspect all relative path components.
+            mapping, series = resolve_mapping_for_path(relative_path, series_mapping or {})
 
             if extension in (".xlsx", ".xls"):
                 results = convert_xlsx(file_bytes, relative_path, file_size, last_modified,
-                                       abfss_file_path=abfss_path, mapping=mapping)
+                                       abfss_file_path=abfss_path, mapping=mapping, series=series)
             # elif extension == ".csv":
             #     results = convert_csv(file_bytes, relative_path, file_size, last_modified, abfss_file_path=abfss_path)
             else:

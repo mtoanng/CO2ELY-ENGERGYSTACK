@@ -167,11 +167,12 @@ def _merge_datetime_columns(
         ).alias("timestamp")
     )
 
-    # Drop the original two columns, replace them with a deterministic
-    # timestamp channel at the earlier of the two positions.
+    # Drop the original two columns, replace them with "timestamp" at the
+    # earlier of the two positions. Preserve the display name from the date side.
     df = df.drop([date_col, time_col])
     timestamp_idx = min(date_idx, time_idx)
     removed_indices = {date_idx, time_idx}
+    original_channel_name = row2_channel_name[date_idx]
 
     new_columns = [c for i, c in enumerate(columns) if i not in removed_indices]
     new_columns.insert(timestamp_idx, "timestamp")
@@ -180,7 +181,7 @@ def _merge_datetime_columns(
     new_row1.insert(timestamp_idx, "timestamp")
 
     new_row2 = [name for i, name in enumerate(row2_channel_name) if i not in removed_indices]
-    new_row2.insert(timestamp_idx, "timestamp")
+    new_row2.insert(timestamp_idx, original_channel_name)
 
     new_units = [unit for i, unit in enumerate(units) if i not in removed_indices]
     new_units.insert(timestamp_idx, "")
@@ -200,6 +201,7 @@ def _process_sheet(
     last_modified: Optional[datetime],
     abfss_file_path: Optional[str] = None,
     mapping: Optional[List[dict]] = None,
+    series: Optional[str] = None,
 ) -> Optional[ConversionResult]:
     """Process a single Excel sheet into 4 Parquet tables. Thread-safe (no shared mutable state).
 
@@ -216,6 +218,10 @@ def _process_sheet(
         last_modified: Blob modification timestamp.
         abfss_file_path: Full abfss:// URI for filemeta.file_path.
             Falls back to relative_path if None.
+        series: Governed series name resolved from the ADLS source folder
+            (e.g. "PoC Stack VI"), same lookup used to select the channel
+            mapping. Stored on filemeta so Gold no longer has to re-derive
+            it via regex on file_path.
 
     Returns:
         ConversionResult with 4 PyArrow tables (filemeta, channel, timeseries,
@@ -306,7 +312,7 @@ def _process_sheet(
     n_channels = len(columns)
 
     # file_path: full abfss:// URI if available, else relative_path
-    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified)
+    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified, series)
     channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 
@@ -343,6 +349,7 @@ def convert(
     last_modified: Optional[datetime] = None,
     abfss_file_path: Optional[str] = None,
     mapping: Optional[List[dict]] = None,
+    series: Optional[str] = None,
 ) -> List[ConversionResult]:
     """Convert XLSX/XLS bytes to 4 Parquet tables per sheet.
 
@@ -357,6 +364,8 @@ def convert(
         last_modified: Blob modification timestamp (stored in filemeta).
         abfss_file_path: Full abfss:// URI stored in filemeta.file_path.
             Falls back to relative_path if None.
+        series: Governed series name resolved from the ADLS source folder,
+            stored directly on filemeta.
 
     Returns:
         List[ConversionResult]: One ConversionResult per non-empty sheet, each
@@ -379,7 +388,7 @@ def convert(
         if name:
             r = _process_sheet(file_bytes, relative_path, file_uuid,
                                file_size, name, last_modified, abfss_file_path,
-                               mapping=mapping)
+                               mapping=mapping, series=series)
             if r:
                 results.append(r)
         return results
@@ -390,7 +399,7 @@ def convert(
         futures = {
             executor.submit(
                 _process_sheet, file_bytes, relative_path, file_uuid,
-                file_size, name, last_modified, abfss_file_path, mapping
+                file_size, name, last_modified, abfss_file_path, mapping, series
             ): name
             for name in sheet_names
         }

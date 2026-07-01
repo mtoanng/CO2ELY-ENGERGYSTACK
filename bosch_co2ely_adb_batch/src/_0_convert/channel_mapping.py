@@ -49,21 +49,30 @@ def load_series_mapping(repo_root: Path) -> dict[str, list[dict]]:
     return result
 
 
-def resolve_mapping_for_path(relative_path: str, series_mapping: dict[str, list[dict]]) -> list[dict]:
-    """Return the best mapping for an ADLS relative path.
+def resolve_mapping_for_path(
+    relative_path: str, series_mapping: dict[str, list[dict]]
+) -> tuple[list[dict], Optional[str]]:
+    """Return the best mapping and matched series name for an ADLS relative path.
 
     The integration-test layout may include extra prefixes such as
     `test/PoC Stack VI/file.xlsx`, so this checks every path component, not only
     the first component.
+
+    Returns:
+        Tuple of (mapping, series). ``series`` is the matched folder name
+        (e.g. "PoC Stack VI") used as the governed series identifier — the
+        same lookup that already selects the channel mapping, captured once
+        at convert time instead of re-derived later via regex on file_path.
+        Both are empty/None if no configured series folder matched.
     """
     if not series_mapping:
-        return []
+        return [], None
     parts = [part.strip() for part in relative_path.replace("\\", "/").split("/") if part.strip()]
     for part in parts:
         mapping = series_mapping.get(part)
         if mapping:
-            return mapping
-    return []
+            return mapping, part
+    return [], None
 
 
 def apply_mapping(
