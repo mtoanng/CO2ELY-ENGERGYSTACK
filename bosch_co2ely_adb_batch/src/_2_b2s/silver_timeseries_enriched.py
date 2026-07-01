@@ -26,7 +26,6 @@ except NameError:
 sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession, DataFrame, functions as F
-from pyspark.sql.utils import AnalysisException
 
 from _5_common.common_utils import (
     build_table_name,
@@ -36,7 +35,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.common_io_utils import write_to_delta, build_external_table_location
+from _5_common.common_io_utils import build_external_table_location
 
 logger = configure_logger("silver_timeseries_enriched")
 
@@ -214,33 +213,59 @@ def main():
         is_integration_test=args.is_integration_test,
     )
 
-    logger.info(f"Reading from: {source_timeseries}")
-    logger.info(f"Reading from: {source_channel}")
+    logger.info(f"Streaming from: {source_timeseries}")
+    logger.info(f"Joining channel metadata from: {source_channel}")
+    logger.info(f"Appending to: {target_table}")
 
-    timeseries_df = spark.read.table(source_timeseries)
-    channel_df = spark.read.table(source_channel)
-    enriched_df = build_enriched_timeseries_df(timeseries_df, channel_df)
-
-    key_columns = ["uuid", "group", "sample_offset", "channel"]
-    try:
-        existing_keys = spark.read.table(target_table).select(*key_columns).distinct()
-        enriched_df = enriched_df.join(existing_keys, on=key_columns, how="left_anti")
-    except AnalysisException:
-        pass
-
-    rows_to_write = enriched_df.count()
-    if rows_to_write == 0:
-        logger.info(f"No new rows for {target_table}")
-        return
-
+    silver_layer = "silver_int_test" if args.is_integration_test else medal["table_prefix"]
     location = build_external_table_location(
         storage_account=storage_account,
         container=medal["adls_container"],
-        layer=medal["table_prefix"],
+        layer=silver_layer,
         table_name="fact_timeseries_enriched",
     )
-    write_to_delta(enriched_df, target_table, mode="append", location=location)
-    logger.info(f"Published {rows_to_write:,} new row(s) -> {target_table}")
+    checkpoint_path = build_external_table_location(
+        storage_account=storage_account,
+        container=medal["adls_container"],
+        layer=silver_layer,
+        table_name="_checkpoints/silver_fact_timeseries_enriched",
+    )
+
+    def append_batch(batch_df: DataFrame, batch_id: int) -> None:
+        channel_df = spark.read.table(source_channel)
+        enriched_df = build_enriched_timeseries_df(batch_df, channel_df).withColumn(
+            "_silver_enriched_at",
+            F.current_timestamp(),
+        )
+
+        (
+            enriched_df.write
+            .format("delta")
+            .mode("append")
+            .option("mergeSchema", "true")
+            .option("path", location)
+            .saveAsTable(target_table)
+        )
+        logger.info(f"Batch {batch_id}: append completed -> {target_table}")
+
+    query = (
+        spark.readStream
+        .table(source_timeseries)
+        .writeStream
+        .foreachBatch(append_batch)
+        .option("checkpointLocation", checkpoint_path)
+        .trigger(availableNow=True)
+        .start()
+    )
+    query.awaitTermination()
+
+    rows_read = 0
+    if query.lastProgress and query.lastProgress.get("numInputRows"):
+        rows_read = query.lastProgress["numInputRows"]
+    else:
+        for progress in query.recentProgress or []:
+            rows_read += progress.get("numInputRows", 0)
+    logger.info(f"Processed {rows_read:,} new source row(s) -> {target_table}")
 
 
 if __name__ == "__main__":

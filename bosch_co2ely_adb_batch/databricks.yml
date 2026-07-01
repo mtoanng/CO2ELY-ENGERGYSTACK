@@ -8,7 +8,7 @@
 # See https://docs.databricks.com/dev-tools/bundles/index.html
 
 bundle:
-  name: co_energystack_pipeline
+  name: bosch_co2ely_adb_batch
 
 include:
   - resources/*.yml

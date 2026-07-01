@@ -26,7 +26,6 @@ sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_timestamp
-from pyspark.sql.utils import AnalysisException
 
 from _5_common.common_utils import (
     build_table_name,
@@ -36,7 +35,7 @@ from _5_common.common_utils import (
     layer_variables,
     medallion_variables,
 )
-from _5_common.common_io_utils import write_to_delta, build_external_table_location
+from _5_common.common_io_utils import build_external_table_location
 
 logger = configure_logger("silver_base")
 
@@ -47,31 +46,42 @@ SILVER_ENTITY_MAP = {
     "statistics": "fact_statistics",
 }
 
-SILVER_ENTITY_KEYS = {
-    "filemeta": ["uuid"],
-    "channel": ["uuid", "group", "channel"],
-    "timeseries": ["uuid", "group", "sample_offset", "channel"],
-    "statistics": ["uuid", "group"],
-}
 
+def _append_table_stream(
+    spark: SparkSession,
+    source_table: str,
+    target_table: str,
+    location: str,
+    checkpoint_path: str,
+) -> int:
+    """Append only new Bronze Delta commits to the Silver table."""
+    stream_df = (
+        spark.readStream
+        .table(source_table)
+        .withColumn("_silver_published_at", current_timestamp())
+    )
 
-def _copy_table(spark, source_table: str, target_table: str, location: str, key_columns: list[str]):
-    """Append bronze rows not yet present in the silver dim/fact table."""
-    df = spark.read.table(source_table).withColumn("_silver_published_at", current_timestamp())
+    query = (
+        stream_df.writeStream
+        .format("delta")
+        .outputMode("append")
+        .option("checkpointLocation", checkpoint_path)
+        .option("mergeSchema", "true")
+        .option("path", location)
+        .trigger(availableNow=True)
+        .toTable(target_table)
+    )
+    query.awaitTermination()
 
-    try:
-        existing_keys = spark.read.table(target_table).select(*key_columns).distinct()
-        df = df.join(existing_keys, on=key_columns, how="left_anti")
-    except AnalysisException:
-        pass
+    rows_written = 0
+    if query.lastProgress and query.lastProgress.get("numInputRows"):
+        rows_written = query.lastProgress["numInputRows"]
+    else:
+        for progress in query.recentProgress or []:
+            rows_written += progress.get("numInputRows", 0)
 
-    rows_to_write = df.count()
-    if rows_to_write == 0:
-        logger.info(f"No new rows for {target_table}")
-        return
-
-    write_to_delta(df, target_table, mode="append", location=location)
-    logger.info(f"Published {rows_to_write:,} new row(s): {source_table} -> {target_table}")
+    logger.info(f"Published {rows_written:,} new row(s): {source_table} -> {target_table}")
+    return rows_written
 
 
 def main():
@@ -95,6 +105,15 @@ def main():
     logger.info(f"  Integration test: {args.is_integration_test}")
     logger.info(f"{'='*60}")
 
+    silver_layer = "silver_int_test" if args.is_integration_test else write_medal["table_prefix"]
+    checkpoint_base = build_external_table_location(
+        storage_account=storage_account,
+        container=write_medal["adls_container"],
+        layer=silver_layer,
+        table_name="_checkpoints",
+    ).rstrip("/")
+
+    total_rows = {}
     for bronze_table, silver_table in SILVER_ENTITY_MAP.items():
         source_table = build_table_name(
             unity_catalog=catalog,
@@ -110,15 +129,25 @@ def main():
             table=silver_table,
             is_integration_test=args.is_integration_test,
         )
-        logger.info(f"Reading from: {source_table}")
-        logger.info(f"Writing to: {target_table}")
+        logger.info(f"Streaming from: {source_table}")
+        logger.info(f"Appending to: {target_table}")
         location = build_external_table_location(
             storage_account=storage_account,
             container=write_medal["adls_container"],
-            layer=write_medal["table_prefix"],
+            layer=silver_layer,
             table_name=silver_table,
         )
-        _copy_table(spark, source_table, target_table, location, SILVER_ENTITY_KEYS[bronze_table])
+        checkpoint_path = f"{checkpoint_base}/silver_base_{silver_table}"
+        total_rows[silver_table] = _append_table_stream(
+            spark,
+            source_table,
+            target_table,
+            location,
+            checkpoint_path,
+        )
+
+    total_written = sum(total_rows.values())
+    logger.info(f"Silver Base append summary: {total_written:,} new row(s)")
 
 
 if __name__ == "__main__":
