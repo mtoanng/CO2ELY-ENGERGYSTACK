@@ -1,21 +1,21 @@
-"""Static channel mapping utilities for converter-stage canonicalization.
+"""Series mapping lookup utilities for converter-stage file classification.
 
 Mappings use the original Dash app JSON format:
     [{"schema_column": "Current", "file_column": "Current", ...}, ...]
 
-The converter resolves a mapping by matching the source series folder in ADLS
-(e.g. `PoC Stack VI`) to `sys_files/config_files/mappings/series_config.json`.
+The converter resolves the mapping file by matching the source series folder in
+ADLS (e.g. `PoC Stack VI`) to `series_config.json`. Canonical channel mapping
+is applied later in Silver; the converter only needs the mapping entries that
+identify structural Date/Time columns and the matched series name.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
-import polars as pl
-
-from converter_utils import logger
+from convert_utils import logger
 
 
 def load_series_mapping(repo_root: Path) -> dict[str, list[dict]]:
@@ -74,59 +74,3 @@ def resolve_mapping_for_path(
             return mapping, part
     return [], None
 
-
-def apply_mapping(
-    df: pl.DataFrame,
-    columns: List[str],
-    row1_channel: List[str],
-    row2_channel_name: List[str],
-    units: List[str],
-    mapping: Optional[List[dict]],
-) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
-    """Rename raw file display names to canonical schema column names.
-
-    Mapping is applied after timestamp merge and before derived formulas.
-    Matching uses row 2 display names (`row2_channel_name`) because that is the
-    format used by the original Dash app mapping files. Empty `file_column`
-    calculation entries are ignored.
-    """
-    if not mapping:
-        return df, columns, row1_channel, row2_channel_name, units
-
-    file_to_schema: dict[str, str] = {}
-    for entry in mapping:
-        file_col = str(entry.get("file_column") or "").strip()
-        schema_col = str(entry.get("schema_column") or "").strip()
-        if file_col and schema_col:
-            file_to_schema[file_col.lower()] = schema_col
-
-    if not file_to_schema:
-        return df, columns, row1_channel, row2_channel_name, units
-
-    new_columns: list[str] = []
-    new_row1: list[str] = []
-    new_row2: list[str] = []
-    new_units: list[str] = []
-    df_renames: dict[str, str] = {}
-    seen_targets: set[str] = set()
-
-    for col_id, row1, row2, unit in zip(columns, row1_channel, row2_channel_name, units):
-        schema_col = file_to_schema.get(row2.strip().lower())
-        if schema_col and schema_col not in seen_targets:
-            seen_targets.add(schema_col)
-            if col_id != schema_col:
-                df_renames[col_id] = schema_col
-            new_columns.append(schema_col)
-            new_row1.append(schema_col)
-            new_row2.append(schema_col)
-        else:
-            new_columns.append(col_id)
-            new_row1.append(row1)
-            new_row2.append(row2)
-        new_units.append(unit)
-
-    if df_renames:
-        df = df.rename(df_renames)
-        logger.info(f"    Mapping applied: {len(df_renames)} channel(s) renamed to canonical names")
-
-    return df, new_columns, new_row1, new_row2, new_units

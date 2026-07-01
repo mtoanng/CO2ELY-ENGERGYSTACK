@@ -11,18 +11,19 @@ Architecture: Distributed Polars on Spark Workers + Azure SDK.
 Join key: UUID (deterministic UUID5 from relative blob path).
 
 Schema naming:
-- channel.channel = original column identifier (row 1 header)
-- channel.channel_name = display name (row 2 header)
+- channel.channel_id = original column identifier (row 1 header)
+- channel.raw_channel = display name (row 2 header)
 - channel.unit = measurement unit (row 3 if detected)
-- timeseries.channel = references channel.channel (the original identifier)
+- timeseries.channel_id = references channel.channel_id (the original identifier)
+- timeseries.timestamp / elapsed_time_s = preserved structural columns, not signal rows
 
 Header logic (scan first 3 rows):
-- Row 1: channel (original column identifier/description)
-- Row 2: channel_name (display name, used as DataFrame header)
+- Row 1: channel_id (original column identifier/description)
+- Row 2: raw_channel (display name)
 - Row 3: if cells contain special chars or are single-char -> unit
          else -> first data row (timeseries starts here)
 
-Timeseries: pure wide->long melt, row index (sample_offset) as identifier.
+Timeseries: signal-only wide->long melt with sample_offset plus structural time.
 """
 import os
 import re
@@ -149,8 +150,8 @@ SCHEMAS = {
     "channel": pa.schema([
         ("uuid", pa.string()),
         ("group", pa.string()),
-        ("channel", pa.string()),
-        ("channel_name", pa.string()),
+        ("channel_id", pa.string()),
+        ("raw_channel", pa.string()),
         ("unit", pa.string()),
         ("column_index", pa.int32()),
     ]),
@@ -158,7 +159,9 @@ SCHEMAS = {
         ("uuid", pa.string()),
         ("group", pa.string()),
         ("sample_offset", pa.int64()),
-        ("channel", pa.string()),
+        ("timestamp", pa.string()),
+        ("elapsed_time_s", pa.float64()),
+        ("channel_id", pa.string()),
         ("value", pa.float64()),
         ("value_str", pa.string()),
     ]),
@@ -325,20 +328,25 @@ def unpivot_timeseries(
     group: str,
     columns: Optional[List[str]] = None,
     chunk_rows: Optional[int] = None,
+    timestamp_column: Optional[str] = None,
+    elapsed_column: Optional[str] = None,
 ):
     """Wide -> long melt using Polars .unpivot().
 
-    Converts a wide DataFrame (one column per channel) into long-format with
-    columns: uuid, group, sample_offset, channel, value, value_str.
+    Converts signal columns into long-format rows with preserved structural
+    timestamp and elapsed-time columns. Structural time columns are not melted
+    as channels.
 
     Args:
         df: Polars DataFrame with data rows. Columns named by channel identifiers.
         file_uuid: Deterministic UUID for this file (join key).
         group: Group identifier (sheet name for xlsx).
-        columns: List of column names to unpivot. If None, uses all columns.
+        columns: Signal column names to unpivot. If None, uses all columns.
         chunk_rows: If provided, processes in row-wise chunks of this size and
             writes each chunk as a Parquet row group into a BytesIO buffer.
             Use this for large files to bound peak memory usage.
+        timestamp_column: Optional structural timestamp column to preserve.
+        elapsed_column: Optional structural elapsed-time column to preserve.
 
     Returns:
         - If chunk_rows is None: pa.Table cast to SCHEMAS["timeseries"].
@@ -348,14 +356,41 @@ def unpivot_timeseries(
     if columns is None:
         columns = df.columns
 
+    if not columns:
+        empty_table = pa.Table.from_pylist([], schema=SCHEMAS["timeseries"])
+        if chunk_rows is None:
+            return empty_table
+        buf = io.BytesIO()
+        writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+        try:
+            writer.write_table(empty_table)
+        finally:
+            writer.close()
+        buf.seek(0)
+        return 0, buf
+
+    def structural_exprs() -> list[pl.Expr]:
+        exprs: list[pl.Expr] = []
+        if timestamp_column and timestamp_column in df.columns:
+            exprs.append(pl.col(timestamp_column).cast(pl.String).alias("timestamp"))
+        else:
+            exprs.append(pl.lit(None, dtype=pl.String).alias("timestamp"))
+        if elapsed_column and elapsed_column in df.columns:
+            exprs.append(pl.col(elapsed_column).cast(pl.String).cast(pl.Float64, strict=False).alias("elapsed_time_s"))
+        else:
+            exprs.append(pl.lit(None, dtype=pl.Float64).alias("elapsed_time_s"))
+        return exprs
+
     if chunk_rows is None:
         # --- In-memory path ---
-        df_indexed = df.select(columns).with_row_index("sample_offset")
+        df_indexed = df.with_row_index("sample_offset").select(
+            ["sample_offset", *columns, *structural_exprs()]
+        )
 
         long_df = df_indexed.unpivot(
-            index=["sample_offset"],
+            index=["sample_offset", "timestamp", "elapsed_time_s"],
             on=columns,
-            variable_name="channel",
+            variable_name="channel_id",
             value_name="raw_value",
         )
 
@@ -374,7 +409,7 @@ def unpivot_timeseries(
 
         return (
             long_df
-            .select(["uuid", "group", "sample_offset", "channel", "value", "value_str"])
+            .select(["uuid", "group", "sample_offset", "timestamp", "elapsed_time_s", "channel_id", "value", "value_str"])
             .to_arrow()
             .cast(SCHEMAS["timeseries"])
         )
@@ -391,14 +426,14 @@ def unpivot_timeseries(
                 length = min(chunk_rows, n_rows - start)
                 chunk = df.slice(start, length)
 
-                chunk_indexed = chunk.select(columns).with_row_index(
-                    "sample_offset", offset=start
+                chunk_indexed = chunk.with_row_index("sample_offset", offset=start).select(
+                    ["sample_offset", *columns, *structural_exprs()]
                 )
 
                 long_chunk = chunk_indexed.unpivot(
-                    index=["sample_offset"],
+                    index=["sample_offset", "timestamp", "elapsed_time_s"],
                     on=columns,
-                    variable_name="channel",
+                    variable_name="channel_id",
                     value_name="raw_value",
                 )
 
@@ -417,7 +452,7 @@ def unpivot_timeseries(
 
                 arrow_chunk = (
                     long_chunk
-                    .select(["uuid", "group", "sample_offset", "channel", "value", "value_str"])
+                    .select(["uuid", "group", "sample_offset", "timestamp", "elapsed_time_s", "channel_id", "value", "value_str"])
                     .to_arrow()
                     .cast(SCHEMAS["timeseries"])
                 )
@@ -471,27 +506,27 @@ def build_filemeta(
 
 def build_channel(
     file_uuid: str, group: str,
-    channels: List[str], channel_names: List[str], units: List[str],
+    channel_ids: List[str], raw_channels: List[str], units: List[str],
 ) -> pa.Table:
     """Build channel catalog PyArrow table from the 3-row header scan.
 
     Args:
         file_uuid: Deterministic UUID for this file (join key).
         group: Group identifier (sheet name or "data").
-        channels: List of channel identifiers (row 1 values).
-        channel_names: List of display names (row 2 values).
+        channel_ids: List of channel identifiers (row 1 values).
+        raw_channels: List of raw display names (row 2 values).
         units: List of unit strings (row 3 values, empty string if no unit).
 
     Returns:
-        PyArrow Table with schema: uuid, group, channel, channel_name, unit,
-        column_index. One row per channel.
+        PyArrow Table with schema: uuid, group, channel_id, raw_channel, unit,
+        column_index. One row per signal channel.
     """
-    n = len(channel_names)
+    n = len(raw_channels)
     return pa.table({
         "uuid": [file_uuid] * n,
         "group": [group] * n,
-        "channel": channels[:n] if len(channels) >= n else channels + [""] * (n - len(channels)),
-        "channel_name": channel_names,
+        "channel_id": channel_ids[:n] if len(channel_ids) >= n else channel_ids + [""] * (n - len(channel_ids)),
+        "raw_channel": raw_channels,
         "unit": units[:n] if len(units) >= n else units + [""] * (n - len(units)),
         "column_index": list(range(n)),
     }, schema=SCHEMAS["channel"])

@@ -108,7 +108,7 @@ common_converter_job_settings: &common_converter_job_settings
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
-        python_file: ../src/_0_convert/run_converter.py
+        python_file: ../src/_0_convert/convert_run.py
         parameters:
           - "--is_integration_test"
           - "{{job.parameters.is_integration_test}}"
@@ -123,7 +123,7 @@ common_converter_job_settings: &common_converter_job_settings
     #   run_if: "ALL_SUCCESS"
     #   job_cluster_key: job_cluster
     #   spark_python_task:
-    #     python_file: ../src/_0_convert/run_converter.py
+    #     python_file: ../src/_0_convert/convert_run.py
     #     parameters:
     #       - "--is_integration_test"
     #       - "{{job.parameters.is_integration_test}}"

@@ -5,9 +5,10 @@ CRITICAL: NO Float64 pre-cast. Raw strings go to generic_unpivot() which
 handles type splitting correctly (cast chain works on String input).
 
 Schema:
-- DataFrame columns are named by ROW 1 (channel = original identifier)
-- channel_name = ROW 2 (display name)
-- timeseries.channel references channel.channel (row 1) for joins
+- DataFrame columns are named by ROW 1 (channel_id = original identifier)
+- raw_channel = ROW 2 (display name)
+- timeseries.channel_id references channel.channel_id (row 1) for joins
+- timestamp and elapsed time are preserved as structural columns, not signal rows
 
 I/O: Receives raw bytes (downloaded by Azure SDK in worker).
 Polars + calamine engine (Rust-native parsing, releases GIL).
@@ -27,13 +28,12 @@ from typing import List, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from converter_utils import (
+from convert_utils import (
     SCHEMAS, ConversionResult, unpivot_timeseries,
     generate_file_uuid, build_filemeta, build_channel, build_statistics,
     detect_units_row, logger,
     CHUNK_ROWS, TIMESERIES_CHUNK_THRESHOLD,
 )
-from channel_mapping import apply_mapping
 from derived_metrics import apply_derived_metrics
 
 # Sheet-level parallelism DISABLED when file-level threading is active.
@@ -45,6 +45,46 @@ _REALTIME_PATTERN = re.compile(r"^real\s*time$", re.IGNORECASE)
 _EXCEL_EPOCH_DATE = "1899-12-31"
 # Zero time that calamine appends to date-only serial numbers
 _ZERO_TIME = "00:00:00"
+
+
+def _norm_channel(value: object) -> str:
+    return str(value or "").strip().lower().replace("_", " ")
+
+
+def _is_elapsed_channel(channel_id: str, raw_channel: str, std_channel: str) -> bool:
+    candidates = {_norm_channel(channel_id), _norm_channel(raw_channel), _norm_channel(std_channel)}
+    return any(value in {"time", "elapsed time", "test time"} for value in candidates)
+
+
+def _split_structural_channels(
+    columns: List[str],
+    row1_channel: List[str],
+    row2_channel_name: List[str],
+    std_channels: List[str],
+    units: List[str],
+) -> Tuple[List[str], List[str], List[str], List[str], List[str], Optional[str], Optional[str]]:
+    signal_columns: list[str] = []
+    signal_row1: list[str] = []
+    signal_row2: list[str] = []
+    signal_std: list[str] = []
+    signal_units: list[str] = []
+    timestamp_column: Optional[str] = None
+    elapsed_column: Optional[str] = None
+
+    for col_id, row1, raw, std, unit in zip(columns, row1_channel, row2_channel_name, std_channels, units):
+        if _norm_channel(col_id) == "timestamp" or _norm_channel(row1) == "timestamp":
+            timestamp_column = col_id
+            continue
+        if _is_elapsed_channel(row1, raw, std):
+            elapsed_column = col_id
+            continue
+        signal_columns.append(col_id)
+        signal_row1.append(row1)
+        signal_row2.append(raw)
+        signal_std.append(std)
+        signal_units.append(unit)
+
+    return signal_columns, signal_row1, signal_row2, signal_std, signal_units, timestamp_column, elapsed_column
 
 
 def _merge_datetime_columns(
@@ -294,26 +334,31 @@ def _process_sheet(
     if n_rows == 0:
         return None
 
-    # --- Apply channel mapping: raw file display names -> canonical schema names ---
-    # Runs AFTER _merge_datetime_columns (Real-time columns already consumed)
-    # and BEFORE apply_derived_metrics (formula lookups need canonical names).
-    if mapping:
-        df, columns, row1_channel, row2_channel_name, units = apply_mapping(
-            df, columns, row1_channel, row2_channel_name, units, mapping
-        )
+    # Keep Bronze raw-ish: canonical channel mapping is applied in Silver.
+    raw_lookup_channels = row2_channel_name.copy()
 
     # --- Compute derived metrics before unpivot (12 formulas from CO_energystacck) ---
-    df, columns, row1_channel, row2_channel_name, units = apply_derived_metrics(
-        df, columns, row1_channel, row2_channel_name, units
+    df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units = apply_derived_metrics(
+        df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units
     )
 
-    # n_channels includes derived metrics; computed after apply_derived_metrics.
-    # NO Float64 pre-cast. Keep raw strings (unpivot handles cast chain).
-    n_channels = len(columns)
+    (
+        signal_columns,
+        signal_row1,
+        signal_row2,
+        _signal_lookup_channels,
+        signal_units,
+        timestamp_column,
+        elapsed_column,
+    ) = _split_structural_channels(columns, row1_channel, row2_channel_name, raw_lookup_channels, units)
+
+    # n_channels and channel catalog include signal/derived channels only.
+    # Structural timestamp/elapsed columns are repeated on timeseries rows.
+    n_channels = len(signal_columns)
 
     # file_path: full abfss:// URI if available, else relative_path
     filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified, series)
-    channel = build_channel(file_uuid, sheet_name, row1_channel, row2_channel_name, units)
+    channel = build_channel(file_uuid, sheet_name, signal_row1, signal_row2, signal_units)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 
     total_timeseries_cells = n_rows * n_channels
@@ -321,9 +366,15 @@ def _process_sheet(
     if total_timeseries_cells > TIMESERIES_CHUNK_THRESHOLD:
         # Write timeseries to BytesIO buffer.
         ts_rows, ts_buffer = unpivot_timeseries(
-            df, file_uuid, sheet_name, columns, chunk_rows=CHUNK_ROWS
+            df,
+            file_uuid,
+            sheet_name,
+            signal_columns,
+            chunk_rows=CHUNK_ROWS,
+            timestamp_column=timestamp_column,
+            elapsed_column=elapsed_column,
         )
-        logger.info(f"    Chunked unpivot: {n_rows} rows * {n_channels} cols = "
+        logger.info(f"    Chunked unpivot: {n_rows} rows * {n_channels} signal cols = "
                     f"{ts_rows:,} ts rows, chunk_size={CHUNK_ROWS}")
 
         return ConversionResult(
@@ -334,7 +385,14 @@ def _process_sheet(
         )
     else:
         # Standard unpivot
-        timeseries = unpivot_timeseries(df, file_uuid, sheet_name, columns)
+        timeseries = unpivot_timeseries(
+            df,
+            file_uuid,
+            sheet_name,
+            signal_columns,
+            timestamp_column=timestamp_column,
+            elapsed_column=elapsed_column,
+        )
         return ConversionResult(
             tables={"filemeta": filemeta, "channel": channel,
                     "timeseries": timeseries, "statistics": statistics},

@@ -20,7 +20,7 @@ Tables written:
 
 Usage (via Databricks job):
     spark_python_task:
-        python_file: ../src/_1_r2b/ingest_parquet_to_bronze.py
+        python_file: ../src/_1_r2b/bronze_ingest_parquet.py
         parameters:
           - "--is_integration_test" / "--env"
 """

@@ -1,4 +1,4 @@
-"""Unit tests for _1_r2b/ingest_parquet_to_bronze.py.
+"""Unit tests for _1_r2b/bronze_ingest_parquet.py.
 
 Tests argument parsing, path construction, Auto Loader config validation,
 and environment resolution for the bronze ingestion job.

@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_0_convert"))
 
 from pyspark.sql import SparkSession
-from converter_utils import get_env_variables, TABLE_TYPES, logger
+from convert_utils import get_env_variables, TABLE_TYPES, logger
 
 
 INT_TEST_TABLES = [

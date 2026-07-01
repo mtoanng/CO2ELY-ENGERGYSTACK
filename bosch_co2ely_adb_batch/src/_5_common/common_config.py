@@ -88,7 +88,7 @@ LAYER_VARIABLES = {
     "_0_convert": {"read_layer": "raw", "write_layer": "raw"},
     "_1_r2b": {"read_layer": "raw", "write_layer": "bronze"},
     "_2_b2s": {"read_layer": "bronze", "write_layer": "silver"},
-    "_3_s2g": {"read_layer": "bronze", "write_layer": "gold"},  # demo: skip silver
+    "_3_s2g": {"read_layer": "silver", "write_layer": "gold"},
 }
 
 
@@ -190,7 +190,7 @@ def build_table_name(
 
 
 # =============================================================================
-# BACKWARD-COMPATIBLE WRAPPERS (used by _0_convert/converter_utils.py)
+# BACKWARD-COMPATIBLE WRAPPERS (used by _0_convert/convert_utils.py)
 # =============================================================================
 
 def get_env_variables(spark, env_override: str = None) -> dict:

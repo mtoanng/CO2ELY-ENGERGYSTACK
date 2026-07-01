@@ -1,4 +1,4 @@
-"""Unit tests for _0_convert/xlsx_converter.py.
+"""Unit tests for _0_convert/convert_xlsx.py.
 
 Tests XLSX parsing: header detection (3-row scan), sheet enumeration,
 multi-sheet handling, data type inference, and edge cases.
@@ -11,7 +11,7 @@ import polars as pl
 import pyarrow as pa
 from unittest.mock import patch
 
-from converter_utils import (
+from convert_utils import (
     SCHEMAS, TABLE_TYPES, ConversionResult,
     build_filemeta, build_channel, build_statistics,
     detect_units_row, unpivot_timeseries,
@@ -20,17 +20,17 @@ from converter_utils import (
 
 # Try importing the converter (may need specific deps)
 try:
-    from xlsx_converter import convert, _merge_datetime_columns
-    HAS_XLSX_CONVERTER = True
+    from convert_xlsx import convert, _merge_datetime_columns, _split_structural_channels
+    HAS_convert_xlsx = True
 except ImportError:
-    HAS_XLSX_CONVERTER = False
+    HAS_convert_xlsx = False
 
 
 # =============================================================================
 # XLSX PARSING
 # =============================================================================
 
-@pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")
+@pytest.mark.skipif(not HAS_convert_xlsx, reason="convert_xlsx not importable")
 class TestXlsxConvert:
     """Full xlsx conversion pipeline: bytes -> ConversionResult list."""
 
@@ -116,7 +116,7 @@ class TestHeaderDetection:
 # MULTI-SHEET HANDLING
 # =============================================================================
 
-@pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")
+@pytest.mark.skipif(not HAS_convert_xlsx, reason="convert_xlsx not importable")
 class TestMultiSheet:
     """Multi-sheet XLSX files produce one ConversionResult per sheet."""
 
@@ -171,7 +171,7 @@ class TestChunkingThreshold:
 # ERROR HANDLING
 # =============================================================================
 
-@pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")
+@pytest.mark.skipif(not HAS_convert_xlsx, reason="convert_xlsx not importable")
 class TestXlsxErrors:
     """Error handling for corrupt/invalid XLSX files."""
 
@@ -194,7 +194,7 @@ class TestXlsxErrors:
 # MERGE DATETIME COLUMNS ("Real time" edge case)
 # =============================================================================
 
-@pytest.mark.skipif(not HAS_XLSX_CONVERTER, reason="xlsx_converter not importable")
+@pytest.mark.skipif(not HAS_convert_xlsx, reason="convert_xlsx not importable")
 class TestMergeDatetimeColumns:
     """Tests for _merge_datetime_columns() — merged 'Real time' header fix.
 
@@ -470,3 +470,30 @@ class TestMergeDatetimeColumns:
         assert result_row2 == ["Real time", "Voltage"]
         assert result_units == ["", "V"]
         assert result_df["timestamp"].to_list() == [None, None]
+
+
+# =============================================================================
+# STRUCTURAL CHANNEL SPLITTING
+# =============================================================================
+
+@pytest.mark.skipif(not HAS_convert_xlsx, reason="convert_xlsx not importable")
+class TestStructuralChannelSplit:
+    """Timestamp and elapsed time stay structural; only signals are unpivoted."""
+
+    def test_timestamp_elapsed_excluded_from_signal_channels(self):
+        result = _split_structural_channels(
+            columns=["timestamp", "Time", "CH0101"],
+            row1_channel=["timestamp", "Time", "CH0101"],
+            row2_channel_name=["Measurement Time", "Time", "Stack Voltage"],
+            std_channels=["Measurement Time", "Time", "Stack Voltage"],
+            units=["", "s", "V"],
+        )
+        signal_columns, signal_row1, signal_row2, signal_std, signal_units, timestamp_col, elapsed_col = result
+
+        assert signal_columns == ["CH0101"]
+        assert signal_row1 == ["CH0101"]
+        assert signal_row2 == ["Stack Voltage"]
+        assert signal_std == ["Stack Voltage"]
+        assert signal_units == ["V"]
+        assert timestamp_col == "timestamp"
+        assert elapsed_col == "Time"

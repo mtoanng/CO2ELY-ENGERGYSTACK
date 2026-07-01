@@ -62,7 +62,7 @@ class TestBronzeE2E:
         """New Parquet files are picked up by Auto Loader."""
         # Steps:
         # 1. Write sample Parquet to parquet_raw/_int_test/{table_type}/
-        # 2. Run ingest_parquet_to_bronze with --is_integration_test true
+        # 2. Run bronze_ingest_parquet with --is_integration_test true
         # 3. Verify Delta table has data
         # 4. Run again: no new rows added (checkpoint remembers)
         pytest.skip("Awaiting int_test infrastructure setup")

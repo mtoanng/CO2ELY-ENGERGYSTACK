@@ -64,8 +64,8 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 # Module-level imports required for _process_single_file (called via addPyFile workers)
-from converter_utils import build_abfss_path
-from channel_mapping import load_series_mapping, resolve_mapping_for_path
+from convert_utils import build_abfss_path
+from series_mapping import load_series_mapping, resolve_mapping_for_path
 
 
 # =============================================================================
@@ -176,7 +176,7 @@ def _process_single_file(
             output_prefix.
         container_client: Azure ContainerClient (shared, thread-safe).
         writer: ParquetWriter instance for uploading output Parquet files.
-        convert_xlsx: xlsx_converter.convert function reference.
+        convert_xlsx: convert_xlsx.convert function reference.
         generate_file_uuid: common.generate_file_uuid function reference.
         sanitize_name: common.sanitize_name function reference.
         logger: Logger instance for structured output.
@@ -307,11 +307,11 @@ def _process_partition(rows: Iterator[Row], series_mapping: dict = None) -> Iter
         return
 
     # Lazy imports — only loaded on workers that actually process data
-    from converter_utils import (
+    from convert_utils import (
         get_blob_service_client, generate_file_uuid, sanitize_name,
         build_abfss_path, ParquetWriter, logger,
     )
-    from xlsx_converter import convert as convert_xlsx
+    from convert_xlsx import convert as convert_xlsx
 
     # Get ADLS config from first row (all rows in partition have same config)
     first_row = rows_list[0]
@@ -404,7 +404,7 @@ def main():
 
     # Import driver-side helpers from shared config and converter utilities.
     from common_config import get_adls_config, get_env_variables
-    from converter_utils import IncrementalTracker, logger
+    from convert_utils import IncrementalTracker, logger
 
     # --- 1. Environment detection ---
     env_vars = get_env_variables(spark, env_override=args.env)
@@ -506,10 +506,10 @@ def main():
     # Distribute source modules for worker imports (uses _SRC_DIR computed at top)
     src_dir = Path(_SRC_DIR)
     for module_file in [
-        "converter_utils.py",
-        "channel_mapping.py",
+        "convert_utils.py",
+        "series_mapping.py",
         "derived_metrics.py",
-        "xlsx_converter.py",
+        "convert_xlsx.py",
     ]:
         module_path = str(src_dir / module_file)
         spark.sparkContext.addPyFile(module_path)

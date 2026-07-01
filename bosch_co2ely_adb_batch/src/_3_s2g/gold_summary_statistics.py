@@ -70,12 +70,12 @@ def main():
 
     df_summary = df.agg(
         F.count("*").alias("total_data_points"),
-        F.avg(F.when(F.col("channel_name") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
-        F.max(F.when(F.col("channel_name") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
-        F.avg(F.when(F.col("channel_name") == "Energy Efficiency", F.col("value"))).alias("avg_energy_efficiency_pct"),
-        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of CO", F.col("value"))).alias("avg_fe_co_pct"),
-        F.avg(F.when(F.col("channel_name") == "Faradaic Efficiency of H2", F.col("value"))).alias("avg_fe_h2_pct"),
-        F.avg(F.when(F.col("channel_name") == "Single Pass Conversion Efficiency", F.col("value"))).alias("avg_spce_pct"),
+        F.avg(F.when(F.col("std_channel") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
+        F.max(F.when(F.col("std_channel") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
+        F.avg(F.when(F.col("std_channel") == "Energy Efficiency", F.col("value"))).alias("avg_energy_efficiency_pct"),
+        F.avg(F.when(F.col("std_channel") == "Faradaic Efficiency of CO", F.col("value"))).alias("avg_fe_co_pct"),
+        F.avg(F.when(F.col("std_channel") == "Faradaic Efficiency of H2", F.col("value"))).alias("avg_fe_h2_pct"),
+        F.avg(F.when(F.col("std_channel") == "Single Pass Conversion Efficiency", F.col("value"))).alias("avg_spce_pct"),
         F.min("elapsed_time").alias("start_time_s"),
         F.max("elapsed_time").alias("end_time_s"),
     )

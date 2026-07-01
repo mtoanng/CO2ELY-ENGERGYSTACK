@@ -1,4 +1,4 @@
-"""Unit tests for _0_convert/converter_utils.py (converter-specific utilities).
+"""Unit tests for _0_convert/convert_utils.py (converter-specific utilities).
 
 Tests UUID generation, sanitization, schema validation, PyArrow table builders,
 unpivot logic (both standard and chunked), and transient error detection.
@@ -11,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datetime import datetime, timezone
 
-from converter_utils import (
+from convert_utils import (
     generate_file_uuid,
     sanitize_name,
     detect_units_row,
@@ -156,7 +156,16 @@ class TestSchemas:
 
     def test_timeseries_schema_fields(self):
         fields = [f.name for f in SCHEMAS["timeseries"]]
-        assert fields == ["uuid", "group", "sample_offset", "channel", "value", "value_str"]
+        assert fields == [
+            "uuid", "group", "sample_offset", "timestamp", "elapsed_time_s",
+            "channel_id", "value", "value_str",
+        ]
+
+    def test_channel_schema_fields(self):
+        fields = [f.name for f in SCHEMAS["channel"]]
+        assert fields == [
+            "uuid", "group", "channel_id", "raw_channel", "unit", "column_index",
+        ]
 
     def test_filemeta_has_timestamps(self):
         fields = {f.name: f.type for f in SCHEMAS["filemeta"]}
@@ -209,10 +218,10 @@ class TestBuildChannel:
         assert indices == [0, 1, 2]
 
     def test_mismatched_lengths_padded(self):
-        """If channels list is shorter, it gets padded with empty strings."""
+        """If channel_id list is shorter, it gets padded with empty strings."""
         result = build_channel("u", "g", ["ch1"], ["name1", "name2"], ["V", "A"])
         assert result.num_rows == 2
-        channels = result.column("channel").to_pylist()
+        channels = result.column("channel_id").to_pylist()
         assert channels[1] == ""  # padded
 
 
@@ -279,6 +288,25 @@ class TestUnpivotTimeseries:
         df = pl.DataFrame({"ch1": [1.0], "ch2": [2.0], "ch3": [3.0]})
         result = unpivot_timeseries(df, "u", "g", columns=["ch1", "ch3"])
         assert result.num_rows == 2  # only 2 channels
+
+    def test_preserves_structural_time_columns(self):
+        import polars as pl
+        df = pl.DataFrame({
+            "timestamp": ["2026-02-14 10:00:00", "2026-02-14 10:01:00"],
+            "Time": [0.0, 60.0],
+            "CH0101": [3.1, 3.2],
+        })
+        result = unpivot_timeseries(
+            df,
+            "u",
+            "g",
+            columns=["CH0101"],
+            timestamp_column="timestamp",
+            elapsed_column="Time",
+        )
+        assert result.column("channel_id").to_pylist() == ["CH0101", "CH0101"]
+        assert result.column("timestamp").to_pylist() == ["2026-02-14 10:00:00", "2026-02-14 10:01:00"]
+        assert result.column("elapsed_time_s").to_pylist() == [0.0, 60.0]
 
     def test_chunked_basic_output(self):
         import polars as pl

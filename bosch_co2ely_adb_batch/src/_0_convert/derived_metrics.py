@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 
 import polars as pl
 
-from converter_utils import logger
+from convert_utils import logger
 
 ACTIVE_AREA_CM2 = 88.0
 FARADAY_CONST = 96485.3
@@ -32,16 +32,17 @@ def apply_derived_metrics(
     columns: List[str],
     row1_channel: List[str],
     row2_channel_name: List[str],
+    std_channels: List[str],
     units: List[str],
-) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str]]:
+) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str], List[str]]:
     """Append Dash-compatible derived metrics to a wide converter DataFrame.
 
-    Input lookup uses canonical display names in `row2_channel_name`; therefore
-    mapping must run before this function. Missing inputs skip the formula.
-    Outputs are strings so the existing unpivot cast chain produces `value` and
-    `value_str` consistently.
+    Input lookup uses the provided channel lookup names. In the Bronze path
+    these are raw row-2 labels; Silver is responsible for canonical mapping.
+    Missing inputs skip the formula. Outputs are strings so the existing unpivot
+    cast chain produces `value` and `value_str` consistently.
     """
-    name_to_col = {name.strip().lower(): col for name, col in zip(row2_channel_name, columns)}
+    name_to_col = {name.strip().lower(): col for name, col in zip(std_channels, columns)}
     original_column_count = len(columns)
 
     def req(*canonical_names: str) -> Optional[List[str]]:
@@ -54,7 +55,7 @@ def apply_derived_metrics(
         return result
 
     def add(col_name: str, unit: str, expr: pl.Expr) -> None:
-        nonlocal df, columns, row1_channel, row2_channel_name, units
+        nonlocal df, columns, row1_channel, row2_channel_name, std_channels, units
         if col_name in df.columns:
             logger.debug(f"    Derived '{col_name}' already exists as raw column - skipped")
             return
@@ -63,6 +64,7 @@ def apply_derived_metrics(
             columns = columns + [col_name]
             row1_channel = row1_channel + [col_name]
             row2_channel_name = row2_channel_name + [col_name]
+            std_channels = std_channels + [col_name]
             units = units + [unit]
         except Exception as exc:
             logger.warning(f"    Derived metric '{col_name}' failed: {exc}")
@@ -140,4 +142,4 @@ def apply_derived_metrics(
     if added_count:
         logger.info(f"    Derived metrics added: {added_count}")
 
-    return df, columns, row1_channel, row2_channel_name, units
+    return df, columns, row1_channel, row2_channel_name, std_channels, units

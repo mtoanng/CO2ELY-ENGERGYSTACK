@@ -106,7 +106,7 @@ def sample_xlsx_bytes():
 @pytest.fixture
 def sample_blob_info():
     """Sample BlobInfo object for testing tracker/listing."""
-    from converter_utils import BlobInfo
+    from convert_utils import BlobInfo
 
     return BlobInfo(
         blob_path="raw_data/test/PoC_Stack_II/measurement_001.xlsx",
