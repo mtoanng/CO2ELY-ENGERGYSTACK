@@ -52,25 +52,33 @@ def load_series_mapping(repo_root: Path) -> dict[str, list[dict]]:
 def resolve_mapping_for_path(
     relative_path: str, series_mapping: dict[str, list[dict]]
 ) -> tuple[list[dict], Optional[str]]:
-    """Return the best mapping and matched series name for an ADLS relative path.
+    """Return the channel mapping and series name for an ADLS relative path.
 
-    The integration-test layout may include extra prefixes such as
-    `test/PoC Stack VI/file.xlsx`, so this checks every path component, not only
-    the first component.
+    Series is always the direct parent folder of the file (one level up),
+    e.g. ``PoC Stack VIII`` from ``PoC Stack VIII/file.xlsx``.
+    This handles both production paths (``Series/file.xlsx``) and
+    integration-test paths (``test/Series/file.xlsx``) without scanning
+    all components.
+
+    If no channel mapping JSON is configured for that folder, mapping is
+    returned as an empty list — the converter falls back to the "Real time"
+    heuristic for date/time column detection and continues without crashing.
 
     Returns:
-        Tuple of (mapping, series). ``series`` is the matched folder name
-        (e.g. "PoC Stack VI") used as the governed series identifier — the
-        same lookup that already selects the channel mapping, captured once
-        at convert time instead of re-derived later via regex on file_path.
-        Both are empty/None if no configured series folder matched.
+        Tuple of (mapping, series). ``series`` is the direct parent folder
+        name (e.g. ``"PoC Stack VIII"``), or None if the path has fewer than
+        2 components. ``mapping`` is the configured list of channel-mapping
+        entries, or ``[]`` if none is registered for this series.
     """
-    if not series_mapping:
-        return [], None
     parts = [part.strip() for part in relative_path.replace("\\", "/").split("/") if part.strip()]
-    for part in parts:
-        mapping = series_mapping.get(part)
-        if mapping:
-            return mapping, part
-    return [], None
+    if len(parts) < 2:
+        return [], None
+    series = parts[-2]  # direct parent folder of the file
+    mapping = series_mapping.get(series, [])
+    if not mapping:
+        logger.info(
+            f"  No channel mapping configured for series '{series}' "
+            "— date/time detection uses 'Real time' heuristic fallback."
+        )
+    return mapping, series
 
