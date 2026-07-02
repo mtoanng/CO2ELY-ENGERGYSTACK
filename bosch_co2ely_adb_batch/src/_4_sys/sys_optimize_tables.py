@@ -10,8 +10,8 @@ query patterns:
   gold_experiment_index  — queried by (series, uuid) for selector dropdowns
   gold_channel_catalog   — queried by (uuid, group) for channel list
   gold_summary_statistics — queried by (series) for KPI tables
-  silver_fact_timeseries_enriched — queried by (uuid, group) from Gold layer
-  bronze_timeseries      — queried by (uuid, group) from Silver layer
+  silver_dim_channel     — joined by Gold on (uuid, group, channel_id)
+  bronze_timeseries      — queried by Gold on (uuid, group)
 
 Liquid clustering on (uuid, group) gives the best I/O skip for the
 multi-experiment time-series query patterns.
@@ -47,8 +47,10 @@ _TABLE_SPECS = [
     ("filemeta",                 "bronze", ["uuid"]),
     ("statistics",               "bronze", ["uuid", "group"]),
     # Silver
-    ("fact_timeseries_enriched", "silver", ["uuid", "group"]),
-    # Gold — timeseries (largest; cluster on channel too for channel-specific queries)
+    ("dim_channel",            "silver", ["uuid", "group", "channel_id"]),
+    ("dim_filemeta",           "silver", ["uuid"]),
+    ("fact_statistics",        "silver", ["uuid", "group"]),
+    # Gold - timeseries (largest; cluster on channel too for channel-specific queries)
     ("timeseries",               "gold",   ["uuid", "group", "std_channel"]),
     ("timeseries_agg",           "gold",   ["uuid", "group", "std_channel"]),
     ("timeseries_agg_15min",     "gold",   ["uuid", "group", "std_channel"]),

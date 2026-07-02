@@ -15,26 +15,23 @@ from dq_engine import DqRule, _empty_failures_df, evaluate_rules  # noqa: E402
 class TestDqEngine:
     def test_not_null_rule_flags_missing_timestamp(self):
         df = MagicMock()
-        selected_df = MagicMock()
         failed_df = MagicMock()
 
-        df.filter.return_value = selected_df
-        selected_df.filter.return_value = failed_df
+        df.filter.return_value = failed_df
         failed_df.withColumn.return_value = failed_df
 
         rule = DqRule(
             rule_id="ts_timestamp_not_null",
             rule_name="Timestamp must be present",
-            target_column="value_str",
+            target_column="timestamp",
             rule_type="not_null",
             severity="high",
-            params={"channel_equals": "timestamp"},
+            params={},
         )
 
         result = evaluate_rules(df, [rule])
         assert result is failed_df
-        df.filter.assert_called()
-        selected_df.filter.assert_called()
+        df.filter.assert_called_once()
         assert failed_df.withColumn.call_count == 6
 
     def test_duplicate_rule_flags_duplicate_points(self):
@@ -56,15 +53,15 @@ class TestDqEngine:
         rule = DqRule(
             rule_id="ts_unique_point",
             rule_name="Timeseries point key must be unique",
-            target_column="channel",
+            target_column="channel_id",
             rule_type="no_duplicate_key",
             severity="high",
-            params={"key_columns": ["uuid", "group", "sample_offset", "channel"]},
+            params={"key_columns": ["uuid", "group", "sample_offset", "channel_id"]},
         )
 
         result = evaluate_rules(df, [rule])
         assert result is final_df
-        df.groupBy.assert_called_once_with("uuid", "group", "sample_offset", "channel")
+        df.groupBy.assert_called_once_with("uuid", "group", "sample_offset", "channel_id")
         df.join.assert_called_once()
 
     def test_no_enabled_rules_returns_empty_failure_schema(self):

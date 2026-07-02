@@ -6,7 +6,6 @@ tables using semantic warehouse-style names.
 Outputs:
     silver_dim_filemeta
     silver_dim_channel
-    silver_fact_timeseries
     silver_fact_statistics
 
 Usage (via Databricks job):
@@ -42,7 +41,6 @@ logger = configure_logger("silver_base")
 SILVER_ENTITY_MAP = {
     "filemeta": "dim_filemeta",
     "channel": "dim_channel",
-    "timeseries": "fact_timeseries",
     "statistics": "fact_statistics",
 }
 

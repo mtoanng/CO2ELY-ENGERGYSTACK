@@ -5,8 +5,8 @@ Checks (in order):
   2. Row counts are non-zero (expected for a populated pipeline)
   3. Key columns present (spot-check, not exhaustive schema enforcement)
   4. Cross-layer referential integrity:
-       silver UUIDs ⊆ bronze UUIDs
-       gold UUIDs   ⊆ silver UUIDs
+       silver dimensions ⊆ bronze source tables
+       gold UUID/group pairs ⊆ bronze timeseries
   5. Gold serving completeness: experiment_index covers all gold_timeseries pairs
 
 Exits non-zero on any failure when --fail_on_error=true (default).
@@ -105,9 +105,10 @@ def main():
         (t(b, "filemeta"),                 ["uuid", "file_path", "series"]),
         (t(b, "statistics"),               ["uuid", "group", "n_rows", "n_channels"]),
         # Silver
-        (t(s, "fact_timeseries_enriched"), ["uuid", "group", "sample_offset", "event_ts",
-                                            "elapsed_time_s", "channel_id", "std_channel", "value"]),
-        # Gold — core
+        (t(s, "dim_filemeta"),             ["uuid", "file_path", "series", "_silver_published_at"]),
+        (t(s, "dim_channel"),              ["uuid", "group", "channel_id", "raw_channel", "unit", "_silver_published_at"]),
+        (t(s, "fact_statistics"),          ["uuid", "group", "n_rows", "n_channels", "_silver_published_at"]),
+        # Gold - core
         (t(g, "timeseries"),               ["uuid", "group", "timestamp", "elapsed_time_s",
                                             "channel_id", "std_channel", "value"]),
         (t(g, "timeseries_agg"),           ["uuid", "group", "elapsed_bin_s", "channel_id",
@@ -148,10 +149,11 @@ def main():
             errors += 1
             logger.warning(f"SCHEMA : {fqn} — missing: {r.get('missing_cols')}")
 
-    # 3. Cross-layer referential integrity (uuid-level)
+    # 3. Cross-layer referential integrity
     integrity_checks = [
-        (t(s, "fact_timeseries_enriched"), t(b, "filemeta"),   ["uuid"]),
-        (t(g, "timeseries"),               t(s, "fact_timeseries_enriched"), ["uuid", "group"]),
+        (t(s, "dim_filemeta"),             t(b, "filemeta"),   ["uuid"]),
+        (t(s, "dim_channel"),              t(b, "channel"),    ["uuid", "group", "channel_id"]),
+        (t(g, "timeseries"),               t(b, "timeseries"), ["uuid", "group"]),
         (t(g, "experiment_index"),         t(g, "timeseries"), ["uuid", "group"]),
     ]
     for child, parent, cols in integrity_checks:

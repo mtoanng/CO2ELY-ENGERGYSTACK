@@ -1,11 +1,11 @@
-"""Unit tests for silver_timeseries_enriched.py."""
+"""Unit tests for gold_timeseries_view.py enrichment."""
 
 from unittest.mock import MagicMock, patch
 
-from silver_timeseries_enriched import build_enriched_timeseries_df
+from gold_timeseries_view import build_enriched_timeseries_df
 
 
-class TestSilverTimeseriesEnriched:
+class TestGoldTimeseriesEnrichment:
     def test_joins_mapping_and_metadata_then_selects_serving_columns(self):
         timeseries_df = MagicMock(name="timeseries_df")
         channel_df = MagicMock(name="channel_df")
@@ -33,7 +33,7 @@ class TestSilverTimeseriesEnriched:
         after_event_ts.withColumn.return_value = after_valid
         after_valid.select.return_value = final_df
 
-        with patch("silver_timeseries_enriched._parse_timestamp"):
+        with patch("gold_timeseries_view._parse_timestamp"):
             result = build_enriched_timeseries_df(timeseries_df, channel_df, filemeta_df, mapping_df)
 
         assert result is final_df

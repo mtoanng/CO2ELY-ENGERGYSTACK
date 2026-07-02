@@ -24,9 +24,11 @@ import pytest
 # Path setup (ensures imports work regardless of where pytest is invoked)
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent  # src/
+sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "_5_common"))
 sys.path.insert(0, str(_REPO_ROOT / "_0_convert"))
 sys.path.insert(0, str(_REPO_ROOT / "_2_b2s"))
+sys.path.insert(0, str(_REPO_ROOT / "_3_s2g"))
 
 
 # ---------------------------------------------------------------------------

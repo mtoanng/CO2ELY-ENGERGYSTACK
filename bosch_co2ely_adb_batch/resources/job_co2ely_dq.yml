@@ -1,4 +1,4 @@
-# Silver data quality job: evaluates timeseries DQ rules and deletes invalid records by default.
+# Silver data quality job: evaluates Bronze timeseries DQ rules and writes Silver DQ metadata.
 
 common_dq_job_settings: &common_dq_job_settings
   parameters:
@@ -7,7 +7,7 @@ common_dq_job_settings: &common_dq_job_settings
     - name: "env"
       default: ${bundle.environment}
     - name: "cleanup_mode"
-      default: "delete_invalid"
+      default: "metadata_only"
     - name: "apply_to_blocking_only"
       default: "true"
   permissions:

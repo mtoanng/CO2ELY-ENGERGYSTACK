@@ -1,7 +1,8 @@
-"""Gold layer: Demo-ready timeseries tables (Silver -> Gold).
+"""Gold layer: Demo-ready timeseries tables (Bronze + Silver dims -> Gold).
 
-Reads curated silver enriched timeseries. Incremental append-only: only processes
-(uuid, group) pairs not already present in the gold tables.
+Reads Bronze timeseries and joins the small conformed Silver dimensions at
+Gold-build time. Incremental append-only: only processes (uuid, group) pairs
+not already present in the gold tables.
 
 Produces two tables:
 
@@ -67,11 +68,78 @@ from _5_common.common_utils import (
     medallion_variables,
 )
 from _5_common.common_io_utils import write_to_delta, build_external_table_location
+from _2_b2s.silver_channel_mapping import build_channel_mapping_df
 
 logger = configure_logger("gold_timeseries")
 
 # Aggregation bin size in seconds.
 _AGG_BIN_S = 60.0
+
+_TIMESTAMP_FORMATS = [
+    "yyyy-MM-dd HH:mm:ss",
+    "yyyy-MM-dd HH:mm:ss.SSS",
+    "yyyy/MM/dd HH:mm:ss",
+    "dd.MM.yyyy HH:mm:ss",
+    "MM/dd/yyyy HH:mm:ss",
+    "yyyy-MM-dd'T'HH:mm:ss",
+    "yyyy-MM-dd'T'HH:mm:ss.SSS",
+]
+
+
+def _parse_timestamp(raw_col) -> F.Column:
+    parsed = None
+    for fmt in _TIMESTAMP_FORMATS:
+        candidate = F.to_timestamp(raw_col, fmt)
+        parsed = candidate if parsed is None else F.coalesce(parsed, candidate)
+    return F.coalesce(parsed, F.to_timestamp(raw_col))
+
+
+def build_enriched_timeseries_df(
+    timeseries_df: DataFrame, channel_df: DataFrame, filemeta_df: DataFrame, mapping_df: DataFrame
+) -> DataFrame:
+    channel_meta = channel_df.select(
+        "uuid",
+        "group",
+        "channel_id",
+        "raw_channel",
+        "unit",
+    )
+    file_series = filemeta_df.select("uuid", "series")
+
+    joined = (
+        timeseries_df
+        .join(F.broadcast(channel_meta), on=["uuid", "group", "channel_id"], how="left")
+        .join(F.broadcast(file_series), on="uuid", how="left")
+        .join(F.broadcast(mapping_df), on=["series", "raw_channel"], how="left")
+    )
+
+    enriched = (
+        joined
+        .withColumn("std_channel", F.coalesce(F.col("mapped_std_channel"), F.col("raw_channel")))
+        .withColumn("event_ts", _parse_timestamp(F.col("timestamp")))
+        .withColumn(
+            "is_valid_timestamp",
+            F.when(F.col("timestamp").isNull(), F.lit(False))
+            .when(F.col("event_ts").isNotNull(), F.lit(True))
+            .otherwise(F.lit(False)),
+        )
+    )
+
+    return enriched.select(
+        "series",
+        "uuid",
+        "group",
+        "sample_offset",
+        "event_ts",
+        "is_valid_timestamp",
+        "elapsed_time_s",
+        "channel_id",
+        "raw_channel",
+        "std_channel",
+        "unit",
+        "value",
+        "value_str",
+    )
 
 
 def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
@@ -86,9 +154,12 @@ def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
         return spark.createDataFrame([], "uuid string, group string")
 
 
-def _build_gold_timeseries(silver_ts: DataFrame) -> DataFrame:
-    """Shape curated Silver rows into the app-serving Gold contract."""
-    return silver_ts.select(
+def _build_gold_timeseries(
+    timeseries_df: DataFrame, channel_df: DataFrame, filemeta_df: DataFrame, mapping_df: DataFrame
+) -> DataFrame:
+    """Join Bronze fact rows with Silver dimensions and shape the Gold contract."""
+    enriched_ts = build_enriched_timeseries_df(timeseries_df, channel_df, filemeta_df, mapping_df)
+    return enriched_ts.select(
         "series", "uuid", "group", "sample_offset",
         F.col("event_ts").alias("timestamp"),
         "elapsed_time_s",
@@ -136,22 +207,32 @@ def main():
     storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
     layers = layer_variables("_3_s2g")
-    read_medal = medallion_variables(layers["read_layer"], environment)
+    silver_medal = medallion_variables(layers["read_layer"], environment)
+    bronze_medal = medallion_variables("bronze", environment)
     gold_medal = medallion_variables(layers["write_layer"], environment)
 
-    schema_r = read_medal["uc_schema"]
+    schema_s = silver_medal["uc_schema"]
+    schema_b = bronze_medal["uc_schema"]
     schema_g = gold_medal["uc_schema"]
 
-    silver_ts_table = build_table_name(
-        catalog, schema_r, read_medal["table_prefix"], "fact_timeseries_enriched", args.is_integration_test
+    bronze_ts_table = build_table_name(
+        catalog, schema_b, bronze_medal["table_prefix"], "timeseries", args.is_integration_test
+    )
+    silver_channel_table = build_table_name(
+        catalog, schema_s, silver_medal["table_prefix"], "dim_channel", args.is_integration_test
+    )
+    silver_filemeta_table = build_table_name(
+        catalog, schema_s, silver_medal["table_prefix"], "dim_filemeta", args.is_integration_test
     )
     gold_ts_table = build_table_name(catalog, schema_g, "gold", "timeseries", args.is_integration_test)
     gold_agg_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg", args.is_integration_test)
 
     logger.info("=" * 60)
-    logger.info("Gold timeseries (Silver -> Gold, append-only)")
+    logger.info("Gold timeseries (Bronze + Silver dims -> Gold, append-only)")
     logger.info(f"  Catalog.Schema: {catalog}.{schema_g}")
-    logger.info(f"  silver_timeseries : {silver_ts_table}")
+    logger.info(f"  bronze_timeseries : {bronze_ts_table}")
+    logger.info(f"  silver_channel    : {silver_channel_table}")
+    logger.info(f"  silver_filemeta   : {silver_filemeta_table}")
     logger.info(f"  gold_timeseries   : {gold_ts_table}")
     logger.info(f"  gold_timeseries_agg: {gold_agg_table}")
     logger.info("=" * 60)
@@ -187,12 +268,10 @@ def main():
         # correctly excludes the pairs we just wrote.
         done_agg_df = _existing_pairs(spark, gold_agg_table)
 
-    # --- Load curated silver ---
-    silver_ts = spark.read.table(silver_ts_table)
-
-    # --- Filter to (uuid, group) pairs not yet in gold_timeseries ---
+    # --- Load Bronze fact and filter to (uuid, group) pairs not yet in gold_timeseries ---
+    bronze_ts = spark.read.table(bronze_ts_table)
     new_pairs = (
-        silver_ts.select("uuid", "group").distinct()
+        bronze_ts.select("uuid", "group").distinct()
         .join(done_ts_df, on=["uuid", "group"], how="left_anti")
     )
     new_count = new_pairs.count()
@@ -201,10 +280,13 @@ def main():
         logger.info("  Nothing new to write. Exiting.")
         return
 
-    silver_ts = silver_ts.join(F.broadcast(new_pairs), on=["uuid", "group"], how="inner")
+    bronze_ts = bronze_ts.join(F.broadcast(new_pairs), on=["uuid", "group"], how="inner")
+    channel_df = spark.read.table(silver_channel_table)
+    filemeta_df = spark.read.table(silver_filemeta_table)
+    mapping_df = build_channel_mapping_df(spark)
 
     # --- Build gold_timeseries (long format, signals only) ---
-    gold_ts_df = _build_gold_timeseries(silver_ts).cache()
+    gold_ts_df = _build_gold_timeseries(bronze_ts, channel_df, filemeta_df, mapping_df).cache()
 
     ts_count = gold_ts_df.count()
     logger.info(f"  gold_timeseries rows (new): {ts_count:,}")

@@ -1,6 +1,6 @@
-"""Silver DQ task for the timeseries fact table.
+"""Silver DQ task for Bronze timeseries facts.
 
-Evaluates a composable rule matrix against silver_fact_timeseries and writes:
+Evaluates a composable rule matrix against bronze_timeseries and writes:
     silver_dim_dq_rule
     silver_fact_timeseries_dq_result
     silver_fact_timeseries_dq_summary
@@ -37,14 +37,14 @@ from _5_common.common_io_utils import write_to_delta, build_external_table_locat
 
 logger = configure_logger("dq_timeseries")
 
-_TIMESERIES_KEY_COLUMNS = ["uuid", "group", "sample_offset", "channel"]
+_TIMESERIES_KEY_COLUMNS = ["uuid", "group", "sample_offset", "channel_id"]
 
 
 def get_dq_job_args() -> argparse.Namespace:
     """Parse base job args plus DQ-specific cleanup controls."""
     args = get_job_args()
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--cleanup_mode", type=str, default="delete_invalid")
+    parser.add_argument("--cleanup_mode", type=str, default="metadata_only")
     parser.add_argument("--apply_to_blocking_only", type=str, default="true")
     dq_args, _ = parser.parse_known_args()
     args.cleanup_mode = dq_args.cleanup_mode.lower()
@@ -67,7 +67,7 @@ def apply_is_valid_flags(spark, source_table: str, invalid_keys):
         ON t.uuid = s.uuid
         AND t.`group` = s.`group`
         AND t.sample_offset = s.sample_offset
-        AND t.channel = s.channel
+        AND t.channel_id = s.channel_id
         WHEN MATCHED THEN UPDATE SET
             is_valid = false
     """)
@@ -83,7 +83,7 @@ def delete_invalid_rows(spark, source_table: str, invalid_keys):
         ON t.uuid = s.uuid
         AND t.`group` = s.`group`
         AND t.sample_offset = s.sample_offset
-        AND t.channel = s.channel
+        AND t.channel_id = s.channel_id
         WHEN MATCHED THEN DELETE
     """)
     spark.catalog.dropTempView("_silver_invalid_timeseries_keys")
@@ -110,14 +110,16 @@ def main():
     environment = env["environment"]
     catalog = env["unity_catalog"]
     layers = layer_variables("_2_b2s")
-    medal = medallion_variables(layers["write_layer"], environment)
+    bronze_medal = medallion_variables(layers["read_layer"], environment)
+    silver_medal = medallion_variables(layers["write_layer"], environment)
     adls_domain = env.get("adls_domain") or ""
     storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
     logger.info(f"{'='*60}")
     logger.info("Silver Timeseries DQ")
     logger.info(f"  Environment: {environment}")
-    logger.info(f"  Catalog.Schema: {catalog}.{medal['uc_schema']}")
+    logger.info(f"  Source Catalog.Schema: {catalog}.{bronze_medal['uc_schema']}")
+    logger.info(f"  DQ Catalog.Schema: {catalog}.{silver_medal['uc_schema']}")
     logger.info(f"  Integration test: {args.is_integration_test}")
     logger.info(f"  Cleanup mode: {args.cleanup_mode}")
     logger.info(f"  Blocking rules only: {args.apply_to_blocking_only}")
@@ -125,73 +127,73 @@ def main():
 
     source_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
-        table="fact_timeseries",
+        schema=bronze_medal["uc_schema"],
+        prefix=bronze_medal["table_prefix"],
+        table="timeseries",
         is_integration_test=args.is_integration_test,
     )
     result_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
+        schema=silver_medal["uc_schema"],
+        prefix=silver_medal["table_prefix"],
         table="fact_timeseries_dq_result",
         is_integration_test=args.is_integration_test,
     )
     summary_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
+        schema=silver_medal["uc_schema"],
+        prefix=silver_medal["table_prefix"],
         table="fact_timeseries_dq_summary",
         is_integration_test=args.is_integration_test,
     )
     rule_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
+        schema=silver_medal["uc_schema"],
+        prefix=silver_medal["table_prefix"],
         table="dim_dq_rule",
         is_integration_test=args.is_integration_test,
     )
     clean_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
+        schema=silver_medal["uc_schema"],
+        prefix=silver_medal["table_prefix"],
         table="fact_timeseries_clean",
         is_integration_test=args.is_integration_test,
     )
 
-    if args.cleanup_mode not in {"annotate", "delete_invalid", "write_clean_table"}:
+    if args.cleanup_mode not in {"metadata_only", "write_clean_table"}:
         raise ValueError(
-            "Unsupported cleanup_mode. Expected one of: annotate, delete_invalid, write_clean_table"
+            "Unsupported cleanup_mode for Bronze-sourced DQ. Expected one of: metadata_only, write_clean_table"
         )
 
-    silver_layer = "silver_int_test" if args.is_integration_test else medal["table_prefix"]
+    silver_layer = "silver_int_test" if args.is_integration_test else silver_medal["table_prefix"]
     checkpoint_path = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=silver_medal["adls_container"],
         layer=silver_layer,
         table_name="_checkpoints/dq_timeseries",
     )
     result_location = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=silver_medal["adls_container"],
         layer=silver_layer,
         table_name="fact_timeseries_dq_result",
     )
     summary_location = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=silver_medal["adls_container"],
         layer=silver_layer,
         table_name="fact_timeseries_dq_summary",
     )
     rule_location = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=silver_medal["adls_container"],
         layer=silver_layer,
         table_name="dim_dq_rule",
     )
     clean_location = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=silver_medal["adls_container"],
         layer=silver_layer,
         table_name="fact_timeseries_clean",
     )
@@ -216,7 +218,7 @@ def main():
     def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         failures = evaluate_rules(batch_df, DEFAULT_TIMESERIES_RULES).withColumn(
             "observed_value",
-            F.coalesce(F.col("value_str"), F.col("value").cast("string")),
+            F.coalesce(F.col("timestamp"), F.col("value_str"), F.col("value").cast("string")),
         ).withColumn("dq_batch_id", F.lit(batch_id))
         summary = summarize_failures(failures).withColumn("dq_batch_id", F.lit(batch_id))
         invalid_keys = _select_invalid_keys(failures, args.apply_to_blocking_only)
@@ -227,10 +229,6 @@ def main():
         if args.cleanup_mode == "write_clean_table":
             clean_df = build_clean_timeseries_df(batch_df, invalid_keys).withColumn("dq_batch_id", F.lit(batch_id))
             write_to_delta(clean_df, clean_table, mode="append", location=clean_location)
-        elif args.cleanup_mode == "annotate":
-            apply_is_valid_flags(spark, source_table, invalid_keys)
-        elif args.cleanup_mode == "delete_invalid":
-            delete_invalid_rows(spark, source_table, invalid_keys)
 
         logger.info(f"Batch {batch_id}: DQ processing completed")
 
