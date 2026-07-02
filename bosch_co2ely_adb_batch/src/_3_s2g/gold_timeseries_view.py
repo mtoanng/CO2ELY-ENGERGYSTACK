@@ -1,44 +1,37 @@
-"""Gold layer: Demo-ready timeseries tables (Bronze + Silver dims -> Gold).
+"""Gold layer: Lean timeseries facts (Bronze + Silver dim_signal -> Gold).
 
-Reads Bronze timeseries and joins the small conformed Silver dimensions at
-Gold-build time. Incremental append-only: only processes (uuid, group) pairs
-not already present in the gold tables.
+Reads Bronze timeseries and joins the small Silver signal dimension at
+Gold-build time via a single broadcast join.  Incremental append-only:
+only processes experiment_id values not already present in the gold tables.
 
 Produces two tables:
 
-gold_timeseries  — long format, one row per sample_offset per signal channel
-    series          string
-    uuid            string
-    group           string
-    sample_offset   bigint
-    timestamp       timestamp  -- standardized event timestamp from Silver
-    elapsed_time_s  double     -- standardized elapsed time from Silver
-    channel_id      string     -- signal channel join key from row-1 header
-    raw_channel     string     -- row-2 display name carried from Bronze
-    std_channel     string     -- canonical mapped channel name from Silver
-    unit            string     -- carried from channel metadata
-    value           double
-    value_str       string
+gold_timeseries — raw drill-down, one row per measurement point
+    series          string       -- app filter #1
+    std_channel     string       -- app filter #2
+    experiment_id   bigint       -- trace identity (replaces uuid+group)
+    signal_id       bigint       -- technical lineage key
+    sample_offset   bigint       -- row ordering within sheet
+    elapsed_time_s  double       -- X-axis (seconds from start)
+    timestamp       timestamp    -- parsed event timestamp
+    value           double       -- Y-axis measurement
+    value_str       string       -- non-numeric fallback
 
-gold_timeseries_agg  — pre-aggregated, 1-minute elapsed-time bins
+gold_timeseries_agg_1min — 1-minute base aggregate
     series          string
-    uuid            string
-    group           string
-    elapsed_bin_s   double     -- FLOOR(elapsed_time_s / 60) * 60
-    channel_id      string
-    raw_channel     string
     std_channel     string
-    unit            string
-    elapsed_time_s  double     -- first elapsed_time_s in the bin (bin start)
-    timestamp       timestamp  -- first timestamp in the bin
+    experiment_id   bigint
+    signal_id       bigint
+    elapsed_bin_s   bigint       -- floor(elapsed_time_s / 60) * 60
+    elapsed_time_s  double       -- first value in bin
+    timestamp       timestamp    -- first timestamp in bin
     value_mean      double
     value_min       double
     value_max       double
     value_count     bigint
 
-Both tables are append-only. Re-running the job skips already-written
-(uuid, group) pairs, so new experiment files are added without rewriting
-existing data.
+Both tables are append-only.  Re-running skips already-written
+experiment_id values.
 
 Usage (via Databricks job):
     spark_python_task:
@@ -68,12 +61,11 @@ from _5_common.common_utils import (
     medallion_variables,
 )
 from _5_common.common_io_utils import write_to_delta, build_external_table_location
-from _2_b2s.silver_channel_mapping import build_channel_mapping_df
 
 logger = configure_logger("gold_timeseries")
 
 # Aggregation bin size in seconds.
-_AGG_BIN_S = 60.0
+_AGG_BIN_S = 60
 
 _TIMESTAMP_FORMATS = [
     "yyyy-MM-dd HH:mm:ss",
@@ -87,6 +79,7 @@ _TIMESTAMP_FORMATS = [
 
 
 def _parse_timestamp(raw_col) -> F.Column:
+    """Try multiple timestamp formats, return first successful parse."""
     parsed = None
     for fmt in _TIMESTAMP_FORMATS:
         candidate = F.to_timestamp(raw_col, fmt)
@@ -94,97 +87,65 @@ def _parse_timestamp(raw_col) -> F.Column:
     return F.coalesce(parsed, F.to_timestamp(raw_col))
 
 
-def build_enriched_timeseries_df(
-    timeseries_df: DataFrame, channel_df: DataFrame, filemeta_df: DataFrame, mapping_df: DataFrame
-) -> DataFrame:
-    channel_meta = channel_df.select(
-        "uuid",
-        "group",
-        "channel_id",
-        "raw_channel",
-        "unit",
-    )
-    file_series = filemeta_df.select("uuid", "series")
-
-    joined = (
-        timeseries_df
-        .join(F.broadcast(channel_meta), on=["uuid", "group", "channel_id"], how="left")
-        .join(F.broadcast(file_series), on="uuid", how="left")
-        .join(F.broadcast(mapping_df), on=["series", "raw_channel"], how="left")
-    )
-
-    enriched = (
-        joined
-        .withColumn("std_channel", F.coalesce(F.col("mapped_std_channel"), F.col("raw_channel")))
-        .withColumn("event_ts", _parse_timestamp(F.col("timestamp")))
-        .withColumn(
-            "is_valid_timestamp",
-            F.when(F.col("timestamp").isNull(), F.lit(False))
-            .when(F.col("event_ts").isNotNull(), F.lit(True))
-            .otherwise(F.lit(False)),
-        )
-    )
-
-    return enriched.select(
-        "series",
-        "uuid",
-        "group",
-        "sample_offset",
-        "event_ts",
-        "is_valid_timestamp",
-        "elapsed_time_s",
-        "channel_id",
-        "raw_channel",
-        "std_channel",
-        "unit",
-        "value",
-        "value_str",
-    )
-
-
-def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
-    """Return distinct (uuid, group) pairs already present in a Delta table.
-
-    Returns an empty DataFrame if the table does not exist yet. Keeping this as
-    a DataFrame avoids collecting all processed pairs to the driver.
-    """
+def _existing_experiment_ids(spark: SparkSession, table: str) -> DataFrame:
+    """Return distinct experiment_id values already present in a Delta table."""
     try:
-        return spark.read.table(table).select("uuid", "group").distinct()
+        return spark.read.table(table).select("experiment_id").distinct()
     except AnalysisException:
-        return spark.createDataFrame([], "uuid string, group string")
+        return spark.createDataFrame([], "experiment_id long")
 
 
 def _build_gold_timeseries(
-    timeseries_df: DataFrame, channel_df: DataFrame, filemeta_df: DataFrame, mapping_df: DataFrame
+    timeseries_df: DataFrame, signal_df: DataFrame,
 ) -> DataFrame:
-    """Join Bronze fact rows with Silver dimensions and shape the Gold contract."""
-    enriched_ts = build_enriched_timeseries_df(timeseries_df, channel_df, filemeta_df, mapping_df)
-    return enriched_ts.select(
-        "series", "uuid", "group", "sample_offset",
-        F.col("event_ts").alias("timestamp"),
+    """Join Bronze fact rows with Silver signal dimension → lean Gold fact.
+
+    Single broadcast join: bronze_timeseries × silver_dim_signal
+    Join key: (uuid, group, channel_id) — natural keys from bronze.
+    Output: lean fact with surrogate keys + app predicates.
+    """
+    # Select only the columns needed from dim_signal for the join
+    signal_meta = signal_df.select(
+        "uuid", "group", "channel_id",
+        "experiment_id", "signal_id", "series", "std_channel",
+    )
+
+    joined = timeseries_df.join(
+        F.broadcast(signal_meta),
+        on=["uuid", "group", "channel_id"],
+        how="inner",
+    )
+
+    return joined.select(
+        "series",
+        "std_channel",
+        "experiment_id",
+        "signal_id",
+        "sample_offset",
         "elapsed_time_s",
-        "channel_id", "raw_channel", "std_channel", "unit",
-        "value", "value_str",
+        _parse_timestamp(F.col("timestamp")).alias("timestamp"),
+        "value",
+        "value_str",
     )
 
 
 def _build_gold_timeseries_agg(gold_ts: DataFrame) -> DataFrame:
     """Aggregate gold_timeseries into 1-minute elapsed-time bins.
 
-    elapsed_time_s and timestamp are the FIRST value per bin (bin start),
-    matching the behaviour of aggregate_timeseries() in the Dash app.
+    elapsed_bin_s is BIGINT (exact integer seconds).
+    elapsed_time_s and timestamp are the FIRST value per bin (bin start).
     """
     return (
         gold_ts
         .filter(F.col("elapsed_time_s").isNotNull() & F.col("value").isNotNull())
         .withColumn(
             "elapsed_bin_s",
-            (F.floor(F.col("elapsed_time_s") / _AGG_BIN_S) * _AGG_BIN_S),
+            (F.floor(F.col("elapsed_time_s") / _AGG_BIN_S) * _AGG_BIN_S).cast("long"),
         )
-        .groupBy("series", "uuid", "group", "elapsed_bin_s", "channel_id", "raw_channel", "std_channel", "unit")
+        .groupBy("series", "std_channel", "experiment_id", "signal_id", "elapsed_bin_s")
         .agg(
             F.first("elapsed_time_s", ignorenulls=True).alias("elapsed_time_s"),
-            F.first("timestamp",      ignorenulls=True).alias("timestamp"),
+            F.first("timestamp", ignorenulls=True).alias("timestamp"),
             F.mean("value").alias("value_mean"),
             F.min("value").alias("value_min"),
             F.max("value").alias("value_max"),
@@ -215,42 +176,43 @@ def main():
     schema_b = bronze_medal["uc_schema"]
     schema_g = gold_medal["uc_schema"]
 
+    # Integration-test-aware layer path (used for all ADLS writes)
+    gold_layer = "gold_int_test" if args.is_integration_test else gold_medal["table_prefix"]
+
+    # Source tables
     bronze_ts_table = build_table_name(
         catalog, schema_b, bronze_medal["table_prefix"], "timeseries", args.is_integration_test
     )
-    silver_channel_table = build_table_name(
-        catalog, schema_s, silver_medal["table_prefix"], "dim_channel", args.is_integration_test
+    silver_signal_table = build_table_name(
+        catalog, schema_s, silver_medal["table_prefix"], "dim_signal", args.is_integration_test
     )
-    silver_filemeta_table = build_table_name(
-        catalog, schema_s, silver_medal["table_prefix"], "dim_filemeta", args.is_integration_test
-    )
+
+    # Target tables
     gold_ts_table = build_table_name(catalog, schema_g, "gold", "timeseries", args.is_integration_test)
-    gold_agg_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg", args.is_integration_test)
+    gold_agg_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg_1min", args.is_integration_test)
 
     logger.info("=" * 60)
-    logger.info("Gold timeseries (Bronze + Silver dims -> Gold, append-only)")
+    logger.info("Gold timeseries (Bronze + Silver dim_signal -> Gold, append-only)")
     logger.info(f"  Catalog.Schema: {catalog}.{schema_g}")
-    logger.info(f"  bronze_timeseries : {bronze_ts_table}")
-    logger.info(f"  silver_channel    : {silver_channel_table}")
-    logger.info(f"  silver_filemeta   : {silver_filemeta_table}")
-    logger.info(f"  gold_timeseries   : {gold_ts_table}")
-    logger.info(f"  gold_timeseries_agg: {gold_agg_table}")
+    logger.info(f"  bronze_timeseries  : {bronze_ts_table}")
+    logger.info(f"  silver_dim_signal  : {silver_signal_table}")
+    logger.info(f"  gold_timeseries    : {gold_ts_table}")
+    logger.info(f"  gold_timeseries_agg_1min: {gold_agg_table}")
+    logger.info(f"  ADLS layer: {gold_layer}")
     logger.info("=" * 60)
 
-    # --- Incremental: find (uuid, group) pairs already in gold ---
-    done_ts_df = _existing_pairs(spark, gold_ts_table)
-    done_agg_df = _existing_pairs(spark, gold_agg_table)
+    # --- Incremental: find experiment_ids already in gold ---
+    done_ts_ids = _existing_experiment_ids(spark, gold_ts_table)
+    done_agg_ids = _existing_experiment_ids(spark, gold_agg_table)
 
-    # Only count missing_agg (used for branching); skip full-count log scans
-    missing_agg_df = done_ts_df.join(done_agg_df, on=["uuid", "group"], how="left_anti")
-    missing_agg_count = missing_agg_df.count()
+    # If raw gold exists but agg is missing, backfill agg from raw gold
+    missing_agg_ids = done_ts_ids.join(done_agg_ids, on="experiment_id", how="left_anti")
+    missing_agg_count = missing_agg_ids.count()
 
-    # If raw gold exists but aggregate is missing, backfill aggregate from raw
-    # gold instead of reprocessing silver and duplicating raw rows.
     if missing_agg_count:
-        logger.info(f"  Backfilling aggregate for {missing_agg_count} existing pair(s)")
+        logger.info(f"  Backfilling agg for {missing_agg_count} existing experiment(s)")
         backfill_gold_ts = spark.read.table(gold_ts_table).join(
-            missing_agg_df, on=["uuid", "group"], how="inner"
+            F.broadcast(missing_agg_ids), on="experiment_id", how="inner"
         )
         backfill_agg_df = _build_gold_timeseries_agg(backfill_gold_ts)
         backfill_count = backfill_agg_df.count()
@@ -258,68 +220,77 @@ def main():
             loc_agg = build_external_table_location(
                 storage_account=storage_account,
                 container=gold_medal["adls_container"],
-                layer=gold_medal["table_prefix"],
-                table_name="timeseries_agg",
+                layer=gold_layer,
+                table_name="timeseries_agg_1min",
             )
             write_to_delta(backfill_agg_df, gold_agg_table, mode="append", location=loc_agg)
-            logger.info(f"  Backfilled {backfill_count:,} aggregate rows -> {gold_agg_table}")
+            logger.info(f"  Backfilled {backfill_count:,} agg rows -> {gold_agg_table}")
 
-        # Refresh done_agg_df after backfill so the left-anti join below
-        # correctly excludes the pairs we just wrote.
-        done_agg_df = _existing_pairs(spark, gold_agg_table)
+        # Refresh done_agg_ids after backfill
+        done_agg_ids = _existing_experiment_ids(spark, gold_agg_table)
 
-    # --- Load Bronze fact and filter to (uuid, group) pairs not yet in gold_timeseries ---
-    bronze_ts = spark.read.table(bronze_ts_table)
-    new_pairs = (
-        bronze_ts.select("uuid", "group").distinct()
-        .join(done_ts_df, on=["uuid", "group"], how="left_anti")
-    )
-    new_count = new_pairs.count()
-    logger.info(f"  New (uuid, group) pairs to process: {new_count}")
+    # --- Load silver_dim_signal (tiny, broadcast) ---
+    signal_df = spark.read.table(silver_signal_table)
+
+    # --- Determine new experiment_ids from signal dim (not yet in gold_timeseries) ---
+    all_experiment_ids = signal_df.select("experiment_id").distinct()
+    new_experiment_ids = all_experiment_ids.join(done_ts_ids, on="experiment_id", how="left_anti")
+    new_count = new_experiment_ids.count()
+    logger.info(f"  New experiment_ids to process: {new_count}")
+
     if new_count == 0:
         logger.info("  Nothing new to write. Exiting.")
         return
 
-    bronze_ts = bronze_ts.join(F.broadcast(new_pairs), on=["uuid", "group"], how="inner")
-    channel_df = spark.read.table(silver_channel_table)
-    filemeta_df = spark.read.table(silver_filemeta_table)
-    mapping_df = build_channel_mapping_df(spark)
+    # --- Load Bronze fact, filter to new experiments only ---
+    # Filter signal_df to only new experiments (for the join)
+    signal_new = signal_df.join(
+        F.broadcast(new_experiment_ids), on="experiment_id", how="inner"
+    )
+    # Get the (uuid, group) pairs for new experiments to filter bronze
+    new_pairs = signal_new.select("uuid", "group").distinct()
+    bronze_ts = (
+        spark.read.table(bronze_ts_table)
+        .join(F.broadcast(new_pairs), on=["uuid", "group"], how="inner")
+    )
 
-    # --- Build gold_timeseries (long format, signals only) ---
-    gold_ts_df = _build_gold_timeseries(bronze_ts, channel_df, filemeta_df, mapping_df).cache()
+    # --- Build gold_timeseries (lean fact) ---
+    gold_ts_df = _build_gold_timeseries(bronze_ts, signal_new).cache()
 
     ts_count = gold_ts_df.count()
     logger.info(f"  gold_timeseries rows (new): {ts_count:,}")
 
+    if ts_count == 0:
+        logger.warning("  No timeseries rows produced (bronze may have no matching data). Skipping writes.")
+        gold_ts_df.unpersist()
+        return
+
     loc_ts = build_external_table_location(
         storage_account=storage_account,
         container=gold_medal["adls_container"],
-        layer=gold_medal["table_prefix"],
+        layer=gold_layer,
         table_name="timeseries",
     )
     write_to_delta(gold_ts_df, gold_ts_table, mode="append", location=loc_ts)
-    logger.info(f"  Appended -> {gold_ts_table}")
 
-    # --- Build gold_timeseries_agg (1-min bins) ---
-    # Exclude pairs already in done_agg_df (covers backfilled pairs too).
-    gold_agg_df = (
-        _build_gold_timeseries_agg(gold_ts_df)
-        .join(F.broadcast(done_agg_df), on=["uuid", "group"], how="left_anti")
-    )
-
+    # --- Build gold_timeseries_agg_1min ---
+    gold_agg_df = _build_gold_timeseries_agg(gold_ts_df)
     agg_count = gold_agg_df.count()
-    logger.info(f"  gold_timeseries_agg rows (new): {agg_count:,}")
+    logger.info(f"  gold_timeseries_agg_1min rows (new): {agg_count:,}")
 
     loc_agg = build_external_table_location(
         storage_account=storage_account,
         container=gold_medal["adls_container"],
-        layer=gold_medal["table_prefix"],
-        table_name="timeseries_agg",
+        layer=gold_layer,
+        table_name="timeseries_agg_1min",
     )
     write_to_delta(gold_agg_df, gold_agg_table, mode="append", location=loc_agg)
-    logger.info(f"  Appended -> {gold_agg_table}")
 
     gold_ts_df.unpersist()
+
+    logger.info("=" * 60)
+    logger.info("Gold timeseries complete.")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

@@ -1,20 +1,14 @@
 """System: OPTIMIZE and cluster Delta tables for query performance.
 
 Runs OPTIMIZE (bin-packing) and ensures liquid clustering is configured
-on all co2ely Delta tables. Targeted at Plotly.js / Databricks SQL Warehouse
+on all co2ely Delta tables.  Targeted at Plotly.js / Databricks SQL Warehouse
 query patterns:
 
-  gold_timeseries        — queried by (uuid, group, std_channel) for chart data
-  gold_timeseries_agg    — queried by (uuid, group, std_channel) for fast overview
-  gold_*_agg_*min        — queried by (uuid, group, std_channel, elapsed_bin_s)
-  gold_experiment_index  — queried by (series, uuid) for selector dropdowns
-  gold_channel_catalog   — queried by (uuid, group) for channel list
-  gold_summary_statistics — queried by (series) for KPI tables
-  silver_dim_channel     — joined by Gold on (uuid, group, channel_id)
-  bronze_timeseries      — queried by Gold on (uuid, group)
+  App filters:  WHERE series = ? AND std_channel IN (?)
+  Drill-down:   WHERE series = ? AND std_channel = ? AND experiment_id = ?
 
-Liquid clustering on (uuid, group) gives the best I/O skip for the
-multi-experiment time-series query patterns.
+Liquid clustering on (series, std_channel, experiment_id) gives the best
+I/O skip for the interactive chart query patterns.
 
 Scheduled weekly or on-demand.
 """
@@ -36,29 +30,25 @@ logger = configure_logger("sys_optimize_tables")
 
 
 # Tables and their liquid-cluster keys, ordered Bronze → Silver → Gold.
-# Cluster key choice rationale: Plotly.js queries always filter on uuid+group
-# (one experiment), then optionally std_channel. Elapsed-time range scans
-# benefit from elapsed_time_s / elapsed_bin_s in the cluster key.
 _TABLE_SPECS = [
     # (table_suffix, prefix, cluster_cols)
-    # Bronze
+    # Bronze (raw staging — clustered for Gold reads)
     ("timeseries",               "bronze", ["uuid", "group"]),
     ("channel",                  "bronze", ["uuid", "group"]),
     ("filemeta",                 "bronze", ["uuid"]),
     ("statistics",               "bronze", ["uuid", "group"]),
-    # Silver
-    ("dim_channel",            "silver", ["uuid", "group", "channel_id"]),
-    ("dim_filemeta",           "silver", ["uuid"]),
-    ("fact_statistics",        "silver", ["uuid", "group"]),
-    # Gold - timeseries (largest; cluster on channel too for channel-specific queries)
-    ("timeseries",               "gold",   ["uuid", "group", "std_channel"]),
-    ("timeseries_agg",           "gold",   ["uuid", "group", "std_channel"]),
-    ("timeseries_agg_15min",     "gold",   ["uuid", "group", "std_channel"]),
-    ("timeseries_agg_60min",     "gold",   ["uuid", "group", "std_channel"]),
-    # Gold — serving/lookup (small; cluster on natural lookup keys)
-    ("experiment_index",         "gold",   ["series", "uuid"]),
-    ("channel_catalog",          "gold",   ["uuid", "group"]),
-    ("summary_statistics",       "gold",   ["series", "uuid"]),
+    # Silver dims (small — clustered for broadcast-join reads)
+    ("dim_experiment",           "silver", ["series", "experiment_id"]),
+    ("dim_signal",               "silver", ["experiment_id"]),
+    # Gold facts (clustered for app query pattern: series → std_channel → experiment)
+    ("timeseries",               "gold",   ["series", "std_channel", "experiment_id"]),
+    ("timeseries_agg_1min",      "gold",   ["series", "std_channel", "experiment_id"]),
+    ("timeseries_agg_15min",     "gold",   ["series", "std_channel", "experiment_id"]),
+    ("timeseries_agg_60min",     "gold",   ["series", "std_channel", "experiment_id"]),
+    # Gold serving/lookup (small — clustered on natural lookup keys)
+    ("experiment_index",         "gold",   ["series", "experiment_id"]),
+    ("channel_catalog_series",   "gold",   ["series"]),
+    ("channel_catalog_experiment", "gold", ["experiment_id"]),
 ]
 
 

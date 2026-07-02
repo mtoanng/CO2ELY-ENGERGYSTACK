@@ -5,9 +5,9 @@ Checks (in order):
   2. Row counts are non-zero (expected for a populated pipeline)
   3. Key columns present (spot-check, not exhaustive schema enforcement)
   4. Cross-layer referential integrity:
-       silver dimensions ⊆ bronze source tables
-       gold UUID/group pairs ⊆ bronze timeseries
-  5. Gold serving completeness: experiment_index covers all gold_timeseries pairs
+       silver dim_signal experiment_ids ⊆ silver dim_experiment
+       gold experiment_ids ⊆ silver dim_experiment
+  5. Gold serving completeness: experiment_index covers all gold experiments
 
 Exits non-zero on any failure when --fail_on_error=true (default).
 """
@@ -104,24 +104,26 @@ def main():
         (t(b, "channel"),                  ["uuid", "group", "channel_id", "raw_channel", "unit"]),
         (t(b, "filemeta"),                 ["uuid", "file_path", "series"]),
         (t(b, "statistics"),               ["uuid", "group", "n_rows", "n_channels"]),
-        # Silver
-        (t(s, "dim_filemeta"),             ["uuid", "file_path", "series", "_silver_published_at"]),
-        (t(s, "dim_channel"),              ["uuid", "group", "channel_id", "raw_channel", "unit", "_silver_published_at"]),
-        (t(s, "fact_statistics"),          ["uuid", "group", "n_rows", "n_channels", "_silver_published_at"]),
-        # Gold - core
-        (t(g, "timeseries"),               ["uuid", "group", "timestamp", "elapsed_time_s",
-                                            "channel_id", "std_channel", "value"]),
-        (t(g, "timeseries_agg"),           ["uuid", "group", "elapsed_bin_s", "channel_id",
-                                            "value_mean", "value_count"]),
-        # Gold — serving
-        (t(g, "experiment_index"),         ["uuid", "group", "series", "start_time_s", "end_time_s",
-                                            "channel_count", "total_data_points"]),
-        (t(g, "channel_catalog"),          ["uuid", "group", "channel_id", "std_channel", "unit"]),
-        (t(g, "timeseries_agg_15min"),     ["uuid", "group", "elapsed_bin_s", "channel_id",
-                                            "value_mean", "value_count"]),
-        (t(g, "timeseries_agg_60min"),     ["uuid", "group", "elapsed_bin_s", "channel_id",
-                                            "value_mean", "value_count"]),
-        (t(g, "summary_statistics"),       ["uuid", "group", "series", "total_data_points"]),
+        # Silver dims
+        (t(s, "dim_experiment"),           ["experiment_id", "uuid", "group", "series"]),
+        (t(s, "dim_signal"),               ["signal_id", "experiment_id", "uuid", "group",
+                                            "channel_id", "raw_channel", "std_channel", "unit", "series"]),
+        # Gold facts
+        (t(g, "timeseries"),               ["series", "std_channel", "experiment_id", "signal_id",
+                                            "sample_offset", "elapsed_time_s", "value"]),
+        (t(g, "timeseries_agg_1min"),      ["series", "std_channel", "experiment_id", "signal_id",
+                                            "elapsed_bin_s", "value_mean", "value_count"]),
+        (t(g, "timeseries_agg_15min"),     ["series", "std_channel", "experiment_id", "signal_id",
+                                            "elapsed_bin_s", "value_mean", "value_count"]),
+        (t(g, "timeseries_agg_60min"),     ["series", "std_channel", "experiment_id", "signal_id",
+                                            "elapsed_bin_s", "value_mean", "value_count"]),
+        # Gold serving
+        (t(g, "experiment_index"),         ["experiment_id", "series", "uuid", "group",
+                                            "start_time_s", "end_time_s", "channel_count",
+                                            "total_data_points", "avg_stack_voltage_v"]),
+        (t(g, "channel_catalog_series"),   ["series", "std_channel", "unit"]),
+        (t(g, "channel_catalog_experiment"), ["experiment_id", "signal_id", "series",
+                                              "std_channel", "unit", "has_data"]),
     ]
 
     results = []
@@ -151,10 +153,9 @@ def main():
 
     # 3. Cross-layer referential integrity
     integrity_checks = [
-        (t(s, "dim_filemeta"),             t(b, "filemeta"),   ["uuid"]),
-        (t(s, "dim_channel"),              t(b, "channel"),    ["uuid", "group", "channel_id"]),
-        (t(g, "timeseries"),               t(b, "timeseries"), ["uuid", "group"]),
-        (t(g, "experiment_index"),         t(g, "timeseries"), ["uuid", "group"]),
+        (t(s, "dim_signal"),               t(s, "dim_experiment"), ["experiment_id"]),
+        (t(g, "timeseries"),               t(s, "dim_experiment"), ["experiment_id"]),
+        (t(g, "experiment_index"),         t(g, "timeseries"),     ["experiment_id"]),
     ]
     for child, parent, cols in integrity_checks:
         r = check_orphans(spark, child, parent, cols)

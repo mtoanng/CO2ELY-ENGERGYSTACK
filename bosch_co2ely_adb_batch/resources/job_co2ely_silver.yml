@@ -1,4 +1,4 @@
-# Silver layer: thin conformed reference tables from Bronze.
+# Silver layer: conformed dimension tables (experiment identity + signal mapping).
 
 common_silver_job_settings: &common_silver_job_settings
   parameters:
@@ -29,11 +29,24 @@ common_silver_job_settings: &common_silver_job_settings
           product_department_team: "ELY"
           project: "CO_energystack"
   tasks:
-    - task_key: tsk_silver_base
+    - task_key: tsk_dim_experiment
       run_if: "ALL_SUCCESS"
       job_cluster_key: job_cluster
       spark_python_task:
-        python_file: ../src/_2_b2s/silver_base.py
+        python_file: ../src/_2_b2s/silver_dim_experiment.py
+        parameters:
+          - "--is_integration_test"
+          - "{{job.parameters.is_integration_test}}"
+          - "--env"
+          - "${bundle.environment}"
+
+    - task_key: tsk_dim_signal
+      run_if: "ALL_SUCCESS"
+      depends_on:
+        - task_key: tsk_dim_experiment
+      job_cluster_key: job_cluster
+      spark_python_task:
+        python_file: ../src/_2_b2s/silver_dim_signal.py
         parameters:
           - "--is_integration_test"
           - "{{job.parameters.is_integration_test}}"

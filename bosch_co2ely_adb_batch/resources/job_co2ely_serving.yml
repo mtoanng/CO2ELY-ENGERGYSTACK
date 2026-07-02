@@ -1,5 +1,5 @@
-# Gold serving tables: experiment index, channel catalog, multi-resolution agg.
-# Runs AFTER gold_timeseries_view (depends on gold_timeseries + gold_timeseries_agg).
+# Gold serving tables: experiment index, channel catalogs, multi-resolution agg.
+# Runs AFTER gold_timeseries_view (depends on gold_timeseries + gold_timeseries_agg_1min).
 
 common_serving_job_settings: &common_serving_job_settings
   parameters:
@@ -35,19 +35,6 @@ common_serving_job_settings: &common_serving_job_settings
       job_cluster_key: job_cluster
       spark_python_task:
         python_file: ../src/_3_s2g/gold_serving_tables.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
-
-    - task_key: tsk_summary_statistics
-      run_if: "ALL_SUCCESS"
-      depends_on:
-        - task_key: tsk_serving_tables
-      job_cluster_key: job_cluster
-      spark_python_task:
-        python_file: ../src/_3_s2g/gold_summary_statistics.py
         parameters:
           - "--is_integration_test"
           - "{{job.parameters.is_integration_test}}"
