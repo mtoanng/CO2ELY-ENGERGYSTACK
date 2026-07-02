@@ -28,6 +28,8 @@ gold_timeseries_agg  — pre-aggregated, 1-minute elapsed-time bins
     raw_channel     string
     std_channel     string
     unit            string
+    elapsed_time_s  double     -- first elapsed_time_s in the bin (bin start)
+    timestamp       timestamp  -- first timestamp in the bin
     value_mean      double
     value_min       double
     value_max       double
@@ -86,11 +88,10 @@ def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
 
 def _build_gold_timeseries(silver_ts: DataFrame) -> DataFrame:
     """Shape curated Silver rows into the app-serving Gold contract."""
-
     return silver_ts.select(
         "series", "uuid", "group", "sample_offset",
         F.col("event_ts").alias("timestamp"),
-        F.col("elapsed_time").alias("elapsed_time_s"),
+        "elapsed_time_s",
         "channel_id", "raw_channel", "std_channel", "unit",
         "value", "value_str",
     )
@@ -111,8 +112,8 @@ def _build_gold_timeseries_agg(gold_ts: DataFrame) -> DataFrame:
         )
         .groupBy("series", "uuid", "group", "elapsed_bin_s", "channel_id", "raw_channel", "std_channel", "unit")
         .agg(
-            F.first("elapsed_time_s",  ignorenulls=True).alias("elapsed_time_s"),
-            F.first("timestamp",       ignorenulls=True).alias("timestamp"),
+            F.first("elapsed_time_s", ignorenulls=True).alias("elapsed_time_s"),
+            F.first("timestamp",      ignorenulls=True).alias("timestamp"),
             F.mean("value").alias("value_mean"),
             F.min("value").alias("value_min"),
             F.max("value").alias("value_max"),
@@ -124,6 +125,8 @@ def _build_gold_timeseries_agg(gold_ts: DataFrame) -> DataFrame:
 def main():
     args = get_job_args()
     spark = SparkSession.builder.getOrCreate()
+    spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
+    spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
 
     env = env_variables(spark, env_override=args.env)
     environment = env["environment"]
@@ -157,11 +160,7 @@ def main():
     done_ts_df = _existing_pairs(spark, gold_ts_table)
     done_agg_df = _existing_pairs(spark, gold_agg_table)
 
-    done_ts_count = done_ts_df.count()
-    done_agg_count = done_agg_df.count()
-    logger.info(f"  Existing gold_timeseries pairs: {done_ts_count}")
-    logger.info(f"  Existing gold_timeseries_agg pairs: {done_agg_count}")
-
+    # Only count missing_agg (used for branching); skip full-count log scans
     missing_agg_df = done_ts_df.join(done_agg_df, on=["uuid", "group"], how="left_anti")
     missing_agg_count = missing_agg_df.count()
 
@@ -184,10 +183,14 @@ def main():
             write_to_delta(backfill_agg_df, gold_agg_table, mode="append", location=loc_agg)
             logger.info(f"  Backfilled {backfill_count:,} aggregate rows -> {gold_agg_table}")
 
+        # Refresh done_agg_df after backfill so the left-anti join below
+        # correctly excludes the pairs we just wrote.
+        done_agg_df = _existing_pairs(spark, gold_agg_table)
+
     # --- Load curated silver ---
     silver_ts = spark.read.table(silver_ts_table)
 
-    # --- Filter to raw gold pairs not written yet ---
+    # --- Filter to (uuid, group) pairs not yet in gold_timeseries ---
     new_pairs = (
         silver_ts.select("uuid", "group").distinct()
         .join(done_ts_df, on=["uuid", "group"], how="left_anti")
@@ -216,6 +219,7 @@ def main():
     logger.info(f"  Appended -> {gold_ts_table}")
 
     # --- Build gold_timeseries_agg (1-min bins) ---
+    # Exclude pairs already in done_agg_df (covers backfilled pairs too).
     gold_agg_df = (
         _build_gold_timeseries_agg(gold_ts_df)
         .join(F.broadcast(done_agg_df), on=["uuid", "group"], how="left_anti")
@@ -231,8 +235,9 @@ def main():
         table_name="timeseries_agg",
     )
     write_to_delta(gold_agg_df, gold_agg_table, mode="append", location=loc_agg)
-    gold_ts_df.unpersist()
     logger.info(f"  Appended -> {gold_agg_table}")
+
+    gold_ts_df.unpersist()
 
 
 if __name__ == "__main__":

@@ -764,7 +764,7 @@ class IncrementalTracker:
         all_blobs = list_source_blobs(storage_account, container, source_prefix)
 
         if watermark:
-            candidates = [b for b in all_blobs if b.last_modified > watermark]
+            candidates = [b for b in all_blobs if b.last_modified >= watermark]
             skipped = len(all_blobs) - len(candidates)
             logger.info(f"Blob listing: {skipped} skipped (before watermark), "
                         f"{len(candidates)} candidates")

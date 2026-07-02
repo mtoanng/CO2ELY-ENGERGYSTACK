@@ -18,6 +18,84 @@ _e2e_job_base: &e2e_job_base
 # COMPOSED JOB SETTINGS
 # =============================================================================
 
+# Tasks for dev/qa/prod (use the production-target child jobs)
+_e2e_tasks_prod: &e2e_tasks_prod
+  - task_key: tsk_converter
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_converter.id}
+    timeout_seconds: 0
+
+  - task_key: tsk_bronze
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_bronze.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_converter
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_silver
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_silver.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_bronze
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_gold
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_gold.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_silver
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_serving
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_serving.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_gold
+    run_if: ALL_SUCCESS
+
+# Tasks for integration test targets (use the int-test child jobs)
+_e2e_tasks_int_test: &e2e_tasks_int_test
+  - task_key: tsk_converter
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_int_test_converter.id}
+    timeout_seconds: 0
+
+  - task_key: tsk_bronze
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_int_test_bronze.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_converter
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_silver
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_int_test_silver.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_bronze
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_gold
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_int_test_gold.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_silver
+    run_if: ALL_SUCCESS
+
+  - task_key: tsk_serving
+    run_job_task:
+      job_id: ${resources.jobs.job_co2ely_int_test_serving.id}
+    timeout_seconds: 0
+    depends_on:
+      - task_key: tsk_gold
+    run_if: ALL_SUCCESS
+
 # Setting for dev/qa/prod
 common_e2e_job_settings: &common_e2e_job_settings
   <<: *e2e_job_base
@@ -30,49 +108,12 @@ common_e2e_job_settings: &common_e2e_job_settings
       - metric: "RUN_DURATION_SECONDS"
         op: "GREATER_THAN"
         value: 18000  # 5 hours
-
-  tasks: &e2e_tasks
-    - task_key: tsk_converter
-      run_job_task:
-        job_id: ${resources.jobs.job_co2ely_converter.id}
-      timeout_seconds: 0
-
-    - task_key: tsk_bronze
-      run_job_task:
-        job_id: ${resources.jobs.job_co2ely_bronze.id}
-      timeout_seconds: 0
-      depends_on:
-        - task_key: tsk_converter
-      run_if: ALL_SUCCESS
-
-    - task_key: tsk_silver
-      run_job_task:
-        job_id: ${resources.jobs.job_co2ely_silver.id}
-      timeout_seconds: 0
-      depends_on:
-        - task_key: tsk_bronze
-      run_if: ALL_SUCCESS
-
-    - task_key: tsk_gold
-      run_job_task:
-        job_id: ${resources.jobs.job_co2ely_gold.id}
-      timeout_seconds: 0
-      depends_on:
-        - task_key: tsk_silver
-      run_if: ALL_SUCCESS
-
-    - task_key: tsk_serving
-      run_job_task:
-        job_id: ${resources.jobs.job_co2ely_serving.id}
-      timeout_seconds: 0
-      depends_on:
-        - task_key: tsk_gold
-      run_if: ALL_SUCCESS
+  tasks: *e2e_tasks_prod
 
 # Setting for integration test
 common_e2e_job_settings_int_test: &common_e2e_job_settings_int_test
   <<: *e2e_job_base
-  tasks: *e2e_tasks
+  tasks: *e2e_tasks_int_test
 
 # =============================================================================
 # TARGETS

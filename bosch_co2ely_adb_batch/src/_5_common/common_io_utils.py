@@ -8,22 +8,7 @@ Utilities categories:
 
   Delta write operations (Spark):
     write_to_delta                - Write Spark DataFrame to Delta (managed or external)
-
-  Polars conversion utilities:
-    polars_to_spark               - Convert Polars DataFrame to Spark DataFrame
-    read_excel_polars             - Read Excel file via Polars calamine engine
 """
-
-# Polars-dependent functions (only importable when polars is installed)
-try:
-    from _2_b2s.enrich_utils import polars_to_spark, read_excel_polars
-except ImportError:
-    # polars not installed (e.g. bronze job) - provide stub that raises
-    def polars_to_spark(*args, **kwargs):
-        raise ImportError("polars_to_spark requires polars. Import from _2_b2s.enrich_utils instead.")
-
-    def read_excel_polars(*args, **kwargs):
-        raise ImportError("read_excel_polars requires polars. Import from _2_b2s.enrich_utils instead.")
 
 
 # =============================================================================
@@ -77,7 +62,7 @@ def build_external_table_location(
 # DELTA WRITE OPERATIONS
 # =============================================================================
 
-def write_to_delta(df, table_name, mode="append", partition_by=None, location=None):
+def write_to_delta(df, table_name, mode="append", partition_by=None, location=None, merge_schema=True):
     """Write DataFrame to Delta table (managed or external).
 
     Args:
@@ -88,6 +73,8 @@ def write_to_delta(df, table_name, mode="append", partition_by=None, location=No
         location: Optional ABFSS location for external table.
                  If provided, creates external table in ADLS; otherwise creates
                  managed table in UC.
+        merge_schema: If True (default), enables schema evolution on write.
+                     Required when adding new columns across pipeline runs.
 
     Examples:
         # Managed table (default)
@@ -101,7 +88,12 @@ def write_to_delta(df, table_name, mode="append", partition_by=None, location=No
     spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
     spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
 
-    writer = df.write.format("delta").mode(mode)
+    writer = (
+        df.write
+        .format("delta")
+        .mode(mode)
+        .option("mergeSchema", str(merge_schema).lower())
+    )
     if partition_by:
         writer = writer.partitionBy(*partition_by)
 

@@ -1,8 +1,12 @@
 """Gold layer: Compute summary statistics for dashboard consumption.
 
-Reads silver enriched table, computes per-experiment summary KPIs
-(mean voltage, total FE, peak current density, SPCE) and writes to
-gold summary table consumed by the Dash reporting dashboard.
+Reads gold_timeseries, computes per-experiment summary KPIs
+(mean voltage, total FE, peak current density, SPCE) and merges into
+gold_summary_statistics consumed by the Dash reporting dashboard.
+
+Incremental: only processes (uuid, group) pairs not yet present in the
+target, using a MERGE to upsert results. Full-overwrite avoided to keep
+cost O(new experiments) rather than O(all experiments).
 
 Usage (via Databricks job):
     spark_python_task:
@@ -21,13 +25,13 @@ sys.path.insert(0, str(_THIS_DIR.parent))
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
 
 from _5_common.common_utils import (
     build_table_name,
     configure_logger,
     env_variables,
     get_job_args,
-    layer_variables,
     medallion_variables,
 )
 from _5_common.common_io_utils import write_to_delta, build_external_table_location
@@ -35,8 +39,15 @@ from _5_common.common_io_utils import write_to_delta, build_external_table_locat
 logger = configure_logger("gold_summary_statistics")
 
 
+def _existing_pairs(spark: SparkSession, table: str):
+    """Return distinct (uuid, group) pairs already present in a Delta table."""
+    try:
+        return spark.read.table(table).select("uuid", "group").distinct()
+    except AnalysisException:
+        return spark.createDataFrame([], "uuid string, group string")
+
+
 def main():
-    """Main entry point for gold summary statistics."""
     args = get_job_args()
     spark = SparkSession.builder.getOrCreate()
 
@@ -49,7 +60,6 @@ def main():
 
     logger.info(f"Environment: {environment}")
 
-    # Read from gold_timeseries (has series column + derived metric channels)
     source_table = build_table_name(
         unity_catalog=catalog,
         schema=write_medal["uc_schema"],
@@ -66,10 +76,28 @@ def main():
     )
 
     logger.info(f"Reading from: {source_table}")
-    df = spark.read.table(source_table)
+    logger.info(f"Writing to:   {target_table}")
+
+    # --- Incremental: only process new (uuid, group) pairs ---
+    done_pairs = _existing_pairs(spark, target_table)
+    gold_ts = spark.read.table(source_table)
+
+    new_pairs = (
+        gold_ts.select("uuid", "group").distinct()
+        .join(done_pairs, on=["uuid", "group"], how="left_anti")
+    )
+    new_count = new_pairs.count()
+    logger.info(f"New (uuid, group) pairs to compute: {new_count}")
+
+    if new_count == 0:
+        logger.info("Nothing new. Exiting.")
+        return
+
+    # Filter gold_timeseries to only new pairs
+    gold_ts_new = gold_ts.join(F.broadcast(new_pairs), on=["uuid", "group"], how="inner")
 
     # Per-experiment summary: one row per (series, uuid, group)
-    df_summary = df.groupBy("series", "uuid", "group").agg(
+    df_summary = gold_ts_new.groupBy("series", "uuid", "group").agg(
         F.count("*").alias("total_data_points"),
         F.avg(F.when(F.col("std_channel") == "Stack Voltage", F.col("value"))).alias("avg_stack_voltage_v"),
         F.max(F.when(F.col("std_channel") == "Current density", F.col("value"))).alias("peak_current_density_ma_cm2"),
@@ -84,7 +112,8 @@ def main():
         "duration_s", F.col("end_time_s") - F.col("start_time_s")
     )
 
-    logger.info("Computed summary statistics")
+    summary_count = df_summary.count()
+    logger.info(f"Computed {summary_count} new summary row(s)")
 
     gold_layer = "gold_int_test" if args.is_integration_test else write_medal["table_prefix"]
     location = build_external_table_location(
@@ -93,8 +122,8 @@ def main():
         layer=gold_layer,
         table_name="summary_statistics",
     )
-    write_to_delta(df_summary, target_table, mode="overwrite", location=location)
-    logger.info(f"Successfully wrote to {target_table}")
+    write_to_delta(df_summary, target_table, mode="append", location=location)
+    logger.info(f"Successfully appended to {target_table}")
 
 
 if __name__ == "__main__":

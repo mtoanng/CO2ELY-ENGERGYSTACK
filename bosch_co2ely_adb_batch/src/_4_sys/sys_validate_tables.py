@@ -1,34 +1,44 @@
-"""System: Validate Delta table integrity.
+"""System: Validate Delta table integrity across all pipeline layers.
 
-Checks:
-1. Tables exist and are readable
-2. Schema matches expected (column names + types)
-3. Row counts are non-zero (or match expected ranges)
-4. No orphan UUIDs (referential integrity between tables)
+Checks (in order):
+  1. Tables exist and are readable
+  2. Row counts are non-zero (expected for a populated pipeline)
+  3. Key columns present (spot-check, not exhaustive schema enforcement)
+  4. Cross-layer referential integrity:
+       silver UUIDs ⊆ bronze UUIDs
+       gold UUIDs   ⊆ silver UUIDs
+  5. Gold serving completeness: experiment_index covers all gold_timeseries pairs
 
+Exits non-zero on any failure when --fail_on_error=true (default).
 """
 import sys
 import json
 import argparse
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "_0_convert"))
+try:
+    _THIS_DIR = Path(__file__).resolve().parent
+except NameError:
+    _THIS_DIR = Path(sys._getframe().f_code.co_filename).resolve().parent
+sys.path.insert(0, str(_THIS_DIR.parent / "_5_common"))
 
 from pyspark.sql import SparkSession
-from convert_utils import get_env_variables, TABLE_TYPES, SCHEMAS, logger
+from common_config import env_variables, medallion_variables, build_table_name
+from common_system_utils import configure_logger
+
+logger = configure_logger("sys_validate_tables")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Validate Delta tables")
     parser.add_argument("--is_integration_test", type=str, default="false")
-    parser.add_argument("--env", type=str, default="dev_user")
+    parser.add_argument("--env", type=str, default="dev")
     parser.add_argument("--fail_on_error", type=str, default="true")
     args, _ = parser.parse_known_args()
     return args
 
 
-def validate_table_exists(spark, fqn: str) -> dict:
-    """Check table exists and is readable."""
+def check_exists(spark, fqn: str) -> dict:
     try:
         count = spark.sql(f"SELECT COUNT(*) AS cnt FROM {fqn}").collect()[0].cnt
         return {"table": fqn, "status": "OK", "row_count": count}
@@ -36,36 +46,37 @@ def validate_table_exists(spark, fqn: str) -> dict:
         return {"table": fqn, "status": "MISSING", "error": str(e)[:200]}
 
 
-def validate_schema(spark, fqn: str, expected_columns: list) -> dict:
-    """Check table schema matches expected columns."""
+def check_columns(spark, fqn: str, required_cols: list[str]) -> dict:
     try:
-        actual_cols = [f.name for f in spark.table(fqn).schema.fields
-                       if not f.name.startswith("_")]  # skip metadata cols
-        missing = set(expected_columns) - set(actual_cols)
-        extra = set(actual_cols) - set(expected_columns)
+        actual = {f.name for f in spark.table(fqn).schema.fields}
+        missing = set(required_cols) - actual
         if missing:
-            return {"table": fqn, "status": "SCHEMA_MISMATCH",
-                    "missing": list(missing), "extra": list(extra)}
+            return {"table": fqn, "status": "SCHEMA_MISMATCH", "missing_cols": sorted(missing)}
         return {"table": fqn, "status": "OK"}
     except Exception as e:
         return {"table": fqn, "status": "ERROR", "error": str(e)[:200]}
 
 
-def validate_referential_integrity(spark, catalog: str, suffix: str) -> dict:
-    """Check all timeseries UUIDs exist in filemeta."""
-    ts_table = f"{catalog}.bronze.co2_timeseries{suffix}"
-    fm_table = f"{catalog}.bronze.co2_filemeta{suffix}"
+def check_orphans(spark, child_table: str, parent_table: str, join_cols: list[str]) -> dict:
+    """Check that all (join_cols) in child_table exist in parent_table."""
+    on_clause = " AND ".join(f"c.`{col}` = p.`{col}`" for col in join_cols)
+    where_null = " OR ".join(f"p.`{col}` IS NULL" for col in join_cols)
     try:
-        orphans = spark.sql(f"""
-            SELECT COUNT(DISTINCT t.uuid) AS orphan_count
-            FROM {ts_table} t
-            LEFT JOIN {fm_table} f ON t.uuid = f.uuid
-            WHERE f.uuid IS NULL
-        """).collect()[0].orphan_count
-        status = "OK" if orphans == 0 else "ORPHANS_FOUND"
-        return {"check": "referential_integrity", "status": status, "orphan_uuids": orphans}
+        orphan_count = spark.sql(f"""
+            SELECT COUNT(*) AS cnt
+            FROM (SELECT DISTINCT {', '.join(f'`{c}`' for c in join_cols)} FROM {child_table}) c
+            LEFT JOIN (SELECT DISTINCT {', '.join(f'`{c}`' for c in join_cols)} FROM {parent_table}) p
+              ON {on_clause}
+            WHERE {where_null}
+        """).collect()[0].cnt
+        status = "OK" if orphan_count == 0 else "ORPHANS_FOUND"
+        return {
+            "check": f"orphans:{child_table}->{parent_table}",
+            "status": status,
+            "orphan_count": orphan_count,
+        }
     except Exception as e:
-        return {"check": "referential_integrity", "status": "SKIP", "error": str(e)[:200]}
+        return {"check": f"orphans:{child_table}->{parent_table}", "status": "SKIP", "error": str(e)[:200]}
 
 
 def main():
@@ -74,49 +85,94 @@ def main():
 
     is_int_test = args.is_integration_test.lower() == "true"
     fail_on_error = args.fail_on_error.lower() == "true"
-    env_vars = get_env_variables(spark)
-    catalog = env_vars["unity_catalog"]
-    suffix = "_int_test" if is_int_test else ""
+
+    env = env_variables(spark, env_override=args.env)
+    environment = env["environment"]
+    catalog = env["unity_catalog"]
+
+    b = medallion_variables("bronze", environment)
+    s = medallion_variables("silver", environment)
+    g = medallion_variables("gold", environment)
+
+    def t(layer_medal, suffix):
+        return build_table_name(catalog, layer_medal["uc_schema"], layer_medal["table_prefix"], suffix, is_int_test)
+
+    # All tables to validate with their required key columns
+    table_checks = [
+        # Bronze
+        (t(b, "timeseries"),               ["uuid", "group", "sample_offset", "channel_id", "value"]),
+        (t(b, "channel"),                  ["uuid", "group", "channel_id", "raw_channel", "unit"]),
+        (t(b, "filemeta"),                 ["uuid", "file_path", "series"]),
+        (t(b, "statistics"),               ["uuid", "group", "n_rows", "n_channels"]),
+        # Silver
+        (t(s, "fact_timeseries_enriched"), ["uuid", "group", "sample_offset", "event_ts",
+                                            "elapsed_time_s", "channel_id", "std_channel", "value"]),
+        # Gold — core
+        (t(g, "timeseries"),               ["uuid", "group", "timestamp", "elapsed_time_s",
+                                            "channel_id", "std_channel", "value"]),
+        (t(g, "timeseries_agg"),           ["uuid", "group", "elapsed_bin_s", "channel_id",
+                                            "value_mean", "value_count"]),
+        # Gold — serving
+        (t(g, "experiment_index"),         ["uuid", "group", "series", "start_time_s", "end_time_s",
+                                            "channel_count", "total_data_points"]),
+        (t(g, "channel_catalog"),          ["uuid", "group", "channel_id", "std_channel", "unit"]),
+        (t(g, "timeseries_agg_15min"),     ["uuid", "group", "elapsed_bin_s", "channel_id",
+                                            "value_mean", "value_count"]),
+        (t(g, "timeseries_agg_60min"),     ["uuid", "group", "elapsed_bin_s", "channel_id",
+                                            "value_mean", "value_count"]),
+        (t(g, "summary_statistics"),       ["uuid", "group", "series", "total_data_points"]),
+    ]
 
     results = []
     errors = 0
 
-    # 1. Check bronze tables exist + have rows
-    for table_type in TABLE_TYPES:
-        fqn = f"{catalog}.bronze.co2_{table_type}{suffix}"
-        r = validate_table_exists(spark, fqn)
+    logger.info("=" * 60)
+    logger.info(f"Pipeline validation — {environment} (int_test={is_int_test})")
+    logger.info("=" * 60)
+
+    # 1. Existence + row count
+    for fqn, _ in table_checks:
+        r = check_exists(spark, fqn)
         results.append(r)
         if r["status"] != "OK":
             errors += 1
-            logger.warning(f"FAIL: {fqn} — {r['status']}")
+            logger.warning(f"MISSING: {fqn}")
         else:
-            logger.info(f"OK: {fqn} ({r['row_count']:,} rows)")
+            logger.info(f"OK ({r['row_count']:>12,} rows): {fqn}")
 
-    # 2. Check schemas
-    for table_type in TABLE_TYPES:
-        fqn = f"{catalog}.bronze.co2_{table_type}{suffix}"
-        expected_cols = [field.name for field in SCHEMAS[table_type]]
-        r = validate_schema(spark, fqn, expected_cols)
+    # 2. Schema spot-check
+    for fqn, required_cols in table_checks:
+        r = check_columns(spark, fqn, required_cols)
         if r["status"] != "OK":
             results.append(r)
             errors += 1
-            logger.warning(f"SCHEMA: {fqn} — {r}")
+            logger.warning(f"SCHEMA : {fqn} — missing: {r.get('missing_cols')}")
 
-    # 3. Referential integrity
-    r = validate_referential_integrity(spark, catalog, suffix)
-    results.append(r)
-    if r["status"] not in ("OK", "SKIP"):
-        errors += 1
-        logger.warning(f"INTEGRITY: {r}")
+    # 3. Cross-layer referential integrity (uuid-level)
+    integrity_checks = [
+        (t(s, "fact_timeseries_enriched"), t(b, "filemeta"),   ["uuid"]),
+        (t(g, "timeseries"),               t(s, "fact_timeseries_enriched"), ["uuid", "group"]),
+        (t(g, "experiment_index"),         t(g, "timeseries"), ["uuid", "group"]),
+    ]
+    for child, parent, cols in integrity_checks:
+        r = check_orphans(spark, child, parent, cols)
+        results.append(r)
+        if r["status"] not in ("OK", "SKIP"):
+            errors += 1
+            logger.warning(f"ORPHANS: {r['check']} — {r['orphan_count']} orphan(s)")
+        else:
+            logger.info(f"OK (integrity): {r['check']}")
 
     # Summary
-    print(f"\n{'='*60}")
-    print(f"Validation Summary: {len(results)} checks, {errors} errors")
-    for r in results:
-        print(f"  {r.get('table', r.get('check', '?'))}: {r['status']}")
+    logger.info("=" * 60)
+    logger.info(f"Validation complete: {len(results)} checks, {errors} error(s)")
+    logger.info("=" * 60)
 
     if errors > 0 and fail_on_error:
-        raise RuntimeError(f"Validation failed: {errors} error(s). Details: {json.dumps(results, default=str)}")
+        raise RuntimeError(
+            f"Validation failed with {errors} error(s). Details:\n"
+            + json.dumps(results, default=str, indent=2)
+        )
 
 
 if __name__ == "__main__":

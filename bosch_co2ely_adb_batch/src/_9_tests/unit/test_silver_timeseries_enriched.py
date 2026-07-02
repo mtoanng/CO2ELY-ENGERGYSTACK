@@ -20,7 +20,6 @@ class TestSilverTimeseriesEnriched:
         after_std = MagicMock(name="after_std")
         after_event_ts = MagicMock(name="after_event_ts")
         after_valid = MagicMock(name="after_valid")
-        after_elapsed = MagicMock(name="after_elapsed")
         final_df = MagicMock(name="final_df")
 
         channel_df.select.return_value = channel_meta
@@ -28,11 +27,11 @@ class TestSilverTimeseriesEnriched:
         timeseries_df.join.return_value = joined_channel
         joined_channel.join.return_value = joined_file
         joined_file.join.return_value = joined_mapping
+        # 3 withColumn calls: std_channel, event_ts, is_valid_timestamp
         joined_mapping.withColumn.return_value = after_std
         after_std.withColumn.return_value = after_event_ts
         after_event_ts.withColumn.return_value = after_valid
-        after_valid.withColumn.return_value = after_elapsed
-        after_elapsed.select.return_value = final_df
+        after_valid.select.return_value = final_df
 
         with patch("silver_timeseries_enriched._parse_timestamp"):
             result = build_enriched_timeseries_df(timeseries_df, channel_df, filemeta_df, mapping_df)
@@ -43,7 +42,7 @@ class TestSilverTimeseriesEnriched:
         timeseries_df.join.assert_called_once()
         joined_channel.join.assert_called_once()
         joined_file.join.assert_called_once()
-        selected_columns = after_elapsed.select.call_args.args
+        selected_columns = after_valid.select.call_args.args
         assert selected_columns == (
             "series",
             "uuid",
@@ -51,7 +50,7 @@ class TestSilverTimeseriesEnriched:
             "sample_offset",
             "event_ts",
             "is_valid_timestamp",
-            "elapsed_time",
+            "elapsed_time_s",
             "channel_id",
             "raw_channel",
             "std_channel",

@@ -46,7 +46,6 @@ from _5_common.common_utils import (
     configure_logger,
     env_variables,
     get_job_args,
-    layer_variables,
     medallion_variables,
 )
 from _5_common.common_io_utils import write_to_delta, build_external_table_location
@@ -64,15 +63,6 @@ def _existing_pairs(spark: SparkSession, table: str) -> DataFrame:
         return spark.read.table(table).select("uuid", "group").distinct()
     except AnalysisException:
         return spark.createDataFrame([], "uuid string, group string")
-
-
-def _new_pairs(source_df: DataFrame, target_table: str, spark: SparkSession) -> DataFrame:
-    """Return (uuid, group) pairs in source not yet in target."""
-    existing = _existing_pairs(spark, target_table)
-    return (
-        source_df.select("uuid", "group").distinct()
-        .join(existing, on=["uuid", "group"], how="left_anti")
-    )
 
 
 # =============================================================================
@@ -97,7 +87,6 @@ def build_experiment_index(gold_ts: DataFrame, filemeta: DataFrame) -> DataFrame
         F.col("end_time_s") - F.col("start_time_s"),
     )
 
-    # Join file metadata for context
     fm = filemeta.select(
         "uuid",
         F.col("file_path").alias("source_file_path"),
@@ -193,25 +182,33 @@ def main():
     logger.info(f"  -> {agg_60_table}")
     logger.info("=" * 60)
 
+    # --- Read gold_timeseries ONCE, cache for reuse across all serving tables ---
+    # Avoids multiple full-table scans for experiment_index, channel_catalog, and
+    # new-pairs discovery which all read the same source.
+    gold_ts_full = spark.read.table(gold_ts_table).cache()
+
     # --- Find new (uuid, group) pairs not yet in serving tables ---
-    new_index_pairs = _new_pairs(
-        spark.read.table(gold_ts_table), index_table, spark
+    existing_index_pairs = _existing_pairs(spark, index_table)
+    new_index_pairs = (
+        gold_ts_full.select("uuid", "group").distinct()
+        .join(existing_index_pairs, on=["uuid", "group"], how="left_anti")
+        .hint("broadcast")
     )
     new_count = new_index_pairs.count()
     logger.info(f"  New (uuid, group) pairs to process: {new_count}")
 
     if new_count == 0:
+        gold_ts_full.unpersist()
         logger.info("  Nothing new. Exiting.")
         return
 
-    new_index_pairs = F.broadcast(new_index_pairs)
+    # Filter cached gold_ts to new pairs only — reused for index, catalog
+    gold_ts = gold_ts_full.join(new_index_pairs, on=["uuid", "group"], how="inner").cache()
+    gold_ts_full.unpersist()
 
     # =========================================================================
     # 1. EXPERIMENT INDEX
     # =========================================================================
-    gold_ts = spark.read.table(gold_ts_table).join(
-        new_index_pairs, on=["uuid", "group"], how="inner"
-    )
     filemeta = spark.read.table(bronze_fm_table)
 
     index_df = build_experiment_index(gold_ts, filemeta)
@@ -231,12 +228,19 @@ def main():
     loc = build_external_table_location(storage_account, gold_medal["adls_container"], gold_layer, "channel_catalog")
     write_to_delta(catalog_df, catalog_table, mode="append", location=loc)
 
+    gold_ts.unpersist()
+
     # =========================================================================
-    # 3. 15-MINUTE AGGREGATION
+    # 3+4. COARSE AGGREGATIONS (15-min and 60-min)
+    # Read gold_timeseries_agg ONCE, cache for both coarse aggregations
     # =========================================================================
-    agg_1min = spark.read.table(gold_agg_table).join(
-        new_index_pairs, on=["uuid", "group"], how="inner"
+    agg_1min = (
+        spark.read.table(gold_agg_table)
+        .join(new_index_pairs, on=["uuid", "group"], how="inner")
+        .cache()
     )
+    # Materialise the cache so both aggregation actions share the cached plan
+    agg_1min.count()
 
     agg_15_df = build_agg_from_1min(agg_1min, bin_seconds=900)
     agg_15_count = agg_15_df.count()
@@ -245,15 +249,14 @@ def main():
     loc = build_external_table_location(storage_account, gold_medal["adls_container"], gold_layer, "timeseries_agg_15min")
     write_to_delta(agg_15_df, agg_15_table, mode="append", location=loc)
 
-    # =========================================================================
-    # 4. 60-MINUTE AGGREGATION
-    # =========================================================================
     agg_60_df = build_agg_from_1min(agg_1min, bin_seconds=3600)
     agg_60_count = agg_60_df.count()
     logger.info(f"  gold_timeseries_agg_60min: {agg_60_count} new row(s)")
 
     loc = build_external_table_location(storage_account, gold_medal["adls_container"], gold_layer, "timeseries_agg_60min")
     write_to_delta(agg_60_df, agg_60_table, mode="append", location=loc)
+
+    agg_1min.unpersist()
 
     logger.info("=" * 60)
     logger.info("Gold serving tables complete.")

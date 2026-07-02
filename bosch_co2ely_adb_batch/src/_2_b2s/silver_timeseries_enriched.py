@@ -83,7 +83,6 @@ def build_enriched_timeseries_df(
             .when(F.col("event_ts").isNotNull(), F.lit(True))
             .otherwise(F.lit(False)),
         )
-        .withColumn("elapsed_time", F.col("elapsed_time_s"))
     )
 
     return enriched.select(
@@ -93,7 +92,7 @@ def build_enriched_timeseries_df(
         "sample_offset",
         "event_ts",
         "is_valid_timestamp",
-        "elapsed_time",
+        "elapsed_time_s",
         "channel_id",
         "raw_channel",
         "std_channel",
