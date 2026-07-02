@@ -7,8 +7,14 @@ Produces four tables optimized for the reporting frontend:
                            Used for selector dropdowns and quick-view panels.
 
   gold_channel_catalog    — one row per (series, uuid, group, channel_id) with
-                           raw_channel, std_channel, and unit. Used for axis
-                           labels and channel selector population.
+                           raw_channel, std_channel, unit, column_index, and
+                           has_data. Drives dynamic channel pickers without
+                           any hardcoding in the serving app:
+                             column_index — original Excel column order so the
+                               picker renders channels in measurement order.
+                             has_data — False for channels that exist in the
+                               header but contain only NULLs (instrument not
+                               connected); app can grey these out or hide them.
 
   gold_timeseries_agg_15min — 15-minute elapsed-time bins with mean/min/max/count.
                               Coarse tier for overview zoom and initial page load.
@@ -99,15 +105,43 @@ def build_experiment_index(gold_ts: DataFrame, filemeta: DataFrame) -> DataFrame
     return ts_summary.join(fm, on="uuid", how="left")
 
 
-def build_channel_catalog(gold_ts: DataFrame) -> DataFrame:
-    """One row per (series, uuid, group, channel_id) with display metadata.
+def build_channel_catalog(
+    gold_ts: DataFrame,
+    bronze_channel: DataFrame,
+    gold_agg: DataFrame,
+) -> DataFrame:
+    """One row per (series, uuid, group, channel_id) for dynamic channel pickers.
 
-    Enables: channel selectors, axis labels, unit lookups.
+    Columns:
+        series, uuid, group, channel_id  — identity / join keys
+        raw_channel                      — display name from row-2 Excel header
+        std_channel                      — canonical mapped channel name
+        unit                             — measurement unit
+        column_index                     — original Excel column position;
+                                           sort ascending for picker order
+        has_data                         — True if the channel has at least one
+                                           non-NULL numeric value; False for
+                                           header-only channels (instrument not
+                                           connected). App should grey out or
+                                           skip has_data=False channels.
     """
+    # column_index comes from bronze_channel (original Excel header position)
+    col_order = bronze_channel.select("uuid", "group", "channel_id", "column_index")
+
+    # has_data: any bin in gold_timeseries_agg with value_count > 0 means real data
+    has_data = (
+        gold_agg
+        .groupBy("uuid", "group", "channel_id")
+        .agg((F.max("value_count") > 0).alias("has_data"))
+    )
+
     return (
         gold_ts
         .select("series", "uuid", "group", "channel_id", "raw_channel", "std_channel", "unit")
         .distinct()
+        .join(col_order, on=["uuid", "group", "channel_id"], how="left")
+        .join(has_data, on=["uuid", "group", "channel_id"], how="left")
+        .withColumn("has_data", F.coalesce(F.col("has_data"), F.lit(False)))
     )
 
 
@@ -162,6 +196,7 @@ def main():
     gold_ts_table = build_table_name(catalog, schema_g, "gold", "timeseries", args.is_integration_test)
     gold_agg_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg", args.is_integration_test)
     bronze_fm_table = build_table_name(catalog, schema_b, "bronze", "filemeta", args.is_integration_test)
+    bronze_ch_table = build_table_name(catalog, schema_b, "bronze", "channel", args.is_integration_test)
 
     # Target serving tables
     index_table = build_table_name(catalog, schema_g, "gold", "experiment_index", args.is_integration_test)
@@ -219,9 +254,24 @@ def main():
     write_to_delta(index_df, index_table, mode="append", location=loc)
 
     # =========================================================================
+    # 2+3+4. Load agg_1min early — needed by channel catalog (has_data) and
+    # both coarse aggregation steps. Cache once, reuse three times.
+    # =========================================================================
+    agg_1min = (
+        spark.read.table(gold_agg_table)
+        .join(new_index_pairs, on=["uuid", "group"], how="inner")
+        .cache()
+    )
+    # Materialise the cache before any downstream action so all three consumers
+    # (channel catalog, 15-min agg, 60-min agg) share a single physical scan.
+    agg_1min.count()
+
+    # =========================================================================
     # 2. CHANNEL CATALOG
     # =========================================================================
-    catalog_df = build_channel_catalog(gold_ts)
+    bronze_channel = spark.read.table(bronze_ch_table)
+
+    catalog_df = build_channel_catalog(gold_ts, bronze_channel, agg_1min)
     catalog_count = catalog_df.count()
     logger.info(f"  gold_channel_catalog: {catalog_count} new row(s)")
 
@@ -229,18 +279,6 @@ def main():
     write_to_delta(catalog_df, catalog_table, mode="append", location=loc)
 
     gold_ts.unpersist()
-
-    # =========================================================================
-    # 3+4. COARSE AGGREGATIONS (15-min and 60-min)
-    # Read gold_timeseries_agg ONCE, cache for both coarse aggregations
-    # =========================================================================
-    agg_1min = (
-        spark.read.table(gold_agg_table)
-        .join(new_index_pairs, on=["uuid", "group"], how="inner")
-        .cache()
-    )
-    # Materialise the cache so both aggregation actions share the cached plan
-    agg_1min.count()
 
     agg_15_df = build_agg_from_1min(agg_1min, bin_seconds=900)
     agg_15_count = agg_15_df.count()
