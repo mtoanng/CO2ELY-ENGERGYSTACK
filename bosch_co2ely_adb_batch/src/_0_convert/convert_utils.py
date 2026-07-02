@@ -361,7 +361,13 @@ def unpivot_timeseries(
         if chunk_rows is None:
             return empty_table
         buf = io.BytesIO()
-        writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+        writer = pq.ParquetWriter(
+            buf,
+            SCHEMAS["timeseries"],
+            compression="zstd",
+            compression_level=3,
+            write_statistics=True,
+        )
         try:
             writer.write_table(empty_table)
         finally:
@@ -419,7 +425,13 @@ def unpivot_timeseries(
         n_rows = df.height
         total_ts_rows = 0
         buf = io.BytesIO()
-        writer = pq.ParquetWriter(buf, SCHEMAS["timeseries"])
+        writer = pq.ParquetWriter(
+            buf,
+            SCHEMAS["timeseries"],
+            compression="zstd",
+            compression_level=3,
+            write_statistics=True,
+        )
 
         try:
             for start in range(0, n_rows, chunk_rows):

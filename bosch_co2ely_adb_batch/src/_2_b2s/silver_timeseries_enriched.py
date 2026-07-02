@@ -1,8 +1,9 @@
 """Silver refinement for timeseries facts.
 
-Bronze timeseries contains signal rows only, with raw channel metadata and
-structural timestamp/elapsed columns. Silver applies canonical channel mapping,
-joins file/channel metadata, and standardizes time columns.
+Reads Bronze converter tables directly. Bronze timeseries contains signal rows
+only, with raw channel metadata and structural timestamp/elapsed columns.
+Silver applies canonical channel mapping, joins file/channel metadata, and
+standardizes time columns.
 
 Outputs:
     silver_fact_timeseries_enriched
@@ -75,7 +76,6 @@ def build_enriched_timeseries_df(
     enriched = (
         joined
         .withColumn("std_channel", F.coalesce(F.col("mapped_std_channel"), F.col("raw_channel")))
-        .withColumn("event_ts_raw", F.col("timestamp"))
         .withColumn("event_ts", _parse_timestamp(F.col("timestamp")))
         .withColumn(
             "is_valid_timestamp",
@@ -84,7 +84,6 @@ def build_enriched_timeseries_df(
             .otherwise(F.lit(False)),
         )
         .withColumn("elapsed_time", F.col("elapsed_time_s"))
-        .withColumn("elapsed_time_raw", F.col("elapsed_time_s").cast("string"))
     )
 
     return enriched.select(
@@ -93,10 +92,8 @@ def build_enriched_timeseries_df(
         "group",
         "sample_offset",
         "event_ts",
-        "event_ts_raw",
         "is_valid_timestamp",
         "elapsed_time",
-        "elapsed_time_raw",
         "channel_id",
         "raw_channel",
         "std_channel",
@@ -116,35 +113,36 @@ def main():
     environment = env["environment"]
     catalog = env["unity_catalog"]
     layers = layer_variables("_2_b2s")
-    medal = medallion_variables(layers["write_layer"], environment)
+    read_medal = medallion_variables(layers["read_layer"], environment)
+    write_medal = medallion_variables(layers["write_layer"], environment)
     adls_domain = env.get("adls_domain") or ""
     storage_account = adls_domain.replace(".dfs.core.windows.net", "")
 
     source_timeseries = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
-        table="fact_timeseries",
+        schema=read_medal["uc_schema"],
+        prefix=read_medal["table_prefix"],
+        table="timeseries",
         is_integration_test=args.is_integration_test,
     )
     source_channel = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
-        table="dim_channel",
+        schema=read_medal["uc_schema"],
+        prefix=read_medal["table_prefix"],
+        table="channel",
         is_integration_test=args.is_integration_test,
     )
     source_filemeta = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
-        table="dim_filemeta",
+        schema=read_medal["uc_schema"],
+        prefix=read_medal["table_prefix"],
+        table="filemeta",
         is_integration_test=args.is_integration_test,
     )
     target_table = build_table_name(
         unity_catalog=catalog,
-        schema=medal["uc_schema"],
-        prefix=medal["table_prefix"],
+        schema=write_medal["uc_schema"],
+        prefix=write_medal["table_prefix"],
         table="fact_timeseries_enriched",
         is_integration_test=args.is_integration_test,
     )
@@ -154,16 +152,16 @@ def main():
     logger.info(f"Joining file metadata from: {source_filemeta}")
     logger.info(f"Appending to: {target_table}")
 
-    silver_layer = "silver_int_test" if args.is_integration_test else medal["table_prefix"]
+    silver_layer = "silver_int_test" if args.is_integration_test else write_medal["table_prefix"]
     location = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=write_medal["adls_container"],
         layer=silver_layer,
         table_name="fact_timeseries_enriched",
     )
     checkpoint_path = build_external_table_location(
         storage_account=storage_account,
-        container=medal["adls_container"],
+        container=write_medal["adls_container"],
         layer=silver_layer,
         table_name="_checkpoints/silver_fact_timeseries_enriched",
     )
@@ -173,10 +171,7 @@ def main():
     def append_batch(batch_df: DataFrame, batch_id: int) -> None:
         channel_df = spark.read.table(source_channel)
         filemeta_df = spark.read.table(source_filemeta)
-        enriched_df = build_enriched_timeseries_df(batch_df, channel_df, filemeta_df, mapping_df).withColumn(
-            "_silver_enriched_at",
-            F.current_timestamp(),
-        )
+        enriched_df = build_enriched_timeseries_df(batch_df, channel_df, filemeta_df, mapping_df)
 
         (
             enriched_df.write

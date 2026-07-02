@@ -1,5 +1,5 @@
-# Silver layer: Polars enrichment + time-binned aggregation
-# Mirrors the CO_energystacck app's 12-formula enrichment pipeline.
+# Silver layer: enriched timeseries from Bronze.
+# Applies channel mapping, joins metadata, and standardizes time columns.
 
 common_silver_job_settings: &common_silver_job_settings
   parameters:
@@ -30,21 +30,8 @@ common_silver_job_settings: &common_silver_job_settings
           product_department_team: "ELY"
           project: "CO_energystack"
   tasks:
-    - task_key: tsk_silver_base
-      run_if: "ALL_SUCCESS"
-      job_cluster_key: job_cluster
-      spark_python_task:
-        python_file: ../src/_2_b2s/silver_base.py
-        parameters:
-          - "--is_integration_test"
-          - "{{job.parameters.is_integration_test}}"
-          - "--env"
-          - "${bundle.environment}"
-
     - task_key: tsk_silver_timeseries_enriched
       run_if: "ALL_SUCCESS"
-      depends_on:
-        - task_key: tsk_silver_base
       job_cluster_key: job_cluster
       spark_python_task:
         python_file: ../src/_2_b2s/silver_timeseries_enriched.py
