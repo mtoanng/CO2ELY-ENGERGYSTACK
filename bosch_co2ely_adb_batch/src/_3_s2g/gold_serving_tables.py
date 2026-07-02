@@ -61,18 +61,16 @@ logger = configure_logger("gold_serving_tables")
 
 def _existing_experiment_ids(spark: SparkSession, table: str) -> DataFrame:
     """Return distinct experiment_id values already present in a Delta table."""
-    try:
-        return spark.read.table(table).select("experiment_id").distinct()
-    except AnalysisException:
+    if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "experiment_id long")
+    return spark.read.table(table).select("experiment_id").distinct()
 
 
 def _existing_series_channels(spark: SparkSession, table: str) -> DataFrame:
     """Return existing (series, std_channel) pairs in the series catalog."""
-    try:
-        return spark.read.table(table).select("series", "std_channel")
-    except AnalysisException:
+    if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "series string, std_channel string")
+    return spark.read.table(table).select("series", "std_channel")
 
 
 # =============================================================================

@@ -62,10 +62,9 @@ logger = configure_logger("silver_dim_signal")
 
 def _existing_signal_ids(spark: SparkSession, table: str) -> DataFrame:
     """Return existing signal_id values to avoid re-inserting."""
-    try:
-        return spark.read.table(table).select("signal_id")
-    except AnalysisException:
+    if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "signal_id long")
+    return spark.read.table(table).select("signal_id")
 
 
 def build_dim_signal(

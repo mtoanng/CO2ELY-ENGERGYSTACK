@@ -89,10 +89,9 @@ def _parse_timestamp(raw_col) -> F.Column:
 
 def _existing_experiment_ids(spark: SparkSession, table: str) -> DataFrame:
     """Return distinct experiment_id values already present in a Delta table."""
-    try:
-        return spark.read.table(table).select("experiment_id").distinct()
-    except AnalysisException:
+    if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "experiment_id long")
+    return spark.read.table(table).select("experiment_id").distinct()
 
 
 def _build_gold_timeseries(

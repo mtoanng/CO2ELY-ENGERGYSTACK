@@ -52,10 +52,9 @@ logger = configure_logger("silver_dim_experiment")
 
 def _existing_experiment_ids(spark: SparkSession, table: str) -> DataFrame:
     """Return existing experiment_id values to avoid re-inserting."""
-    try:
-        return spark.read.table(table).select("experiment_id")
-    except AnalysisException:
+    if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "experiment_id long")
+    return spark.read.table(table).select("experiment_id")
 
 
 def build_dim_experiment(
