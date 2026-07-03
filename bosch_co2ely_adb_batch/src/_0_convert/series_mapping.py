@@ -12,10 +12,11 @@ identify structural Date/Time columns and the matched series name.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
-from convert_utils import logger
+logger = logging.getLogger("ely_converter")
 
 
 def load_series_mapping(repo_root: Path) -> dict[str, list[dict]]:
@@ -81,4 +82,3 @@ def resolve_mapping_for_path(
             "— date/time detection uses 'Real time' heuristic fallback."
         )
     return mapping, series
-

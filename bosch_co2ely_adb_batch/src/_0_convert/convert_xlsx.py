@@ -23,7 +23,6 @@ Memory safety:
 import io
 import re
 import polars as pl
-import pyarrow as pa
 from typing import List, Optional, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed

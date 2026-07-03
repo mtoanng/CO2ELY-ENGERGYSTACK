@@ -95,11 +95,13 @@ def build_dim_signal(
     )
 
     # Join mapping to get std_channel (left join — not all channels have mappings)
+    # mapping_df.raw_channel holds file_column values, which are channel_id identifiers
+    # (Excel ROW 1), not raw_channel display names (ROW 2). Rename before joining.
     enriched = (
         enriched
         .join(
-            F.broadcast(mapping_df),
-            on=["series", "raw_channel"],
+            F.broadcast(mapping_df.withColumnRenamed("raw_channel", "channel_id")),
+            on=["series", "channel_id"],
             how="left",
         )
         .withColumn(

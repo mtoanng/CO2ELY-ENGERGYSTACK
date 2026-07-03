@@ -7,11 +7,12 @@ CO_energystacck.src.backend.data_enrichment.DataEnrichment.
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional, Tuple
 
 import polars as pl
 
-from convert_utils import logger
+logger = logging.getLogger("ely_converter")
 
 ACTIVE_AREA_CM2 = 88.0
 FARADAY_CONST = 96485.3

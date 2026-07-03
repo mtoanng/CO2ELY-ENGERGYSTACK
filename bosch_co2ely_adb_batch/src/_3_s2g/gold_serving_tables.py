@@ -5,7 +5,6 @@ Produces tables optimized for the Plotly.js reporting frontend:
   gold_timeseries_agg_15min  — 15-minute elapsed-time bins (overview).
   gold_timeseries_agg_60min  — 60-minute elapsed-time bins (long experiments).
   gold_experiment_index      — merged metadata + KPI summary per experiment.
-  gold_channel_catalog_series     — unique (series, std_channel, unit) for pickers.
   gold_channel_catalog_experiment — per-experiment channel availability.
 
 All tables are append-only.  Incrementality is by experiment_id: only new
@@ -14,11 +13,16 @@ experiments not yet present in the target are processed.
 Idempotency contract:
   - experiment_index is written LAST (commit marker). If the script is
     interrupted, the next run reprocesses the same experiments.
-  - channel_catalog_series uses anti-join (safe for retry).
   - channel_catalog_experiment and agg tiers may see duplicates on retry
     (extremely rare — requires job failure between writes within a single run).
   - Only experiments that EXIST in gold_timeseries_agg_1min are processed,
     making it safe to run even if gold_timeseries_view hasn't completed.
+
+Series-level channel picker is derived at query time from gold_channel_catalog_experiment:
+    SELECT DISTINCT series, std_channel, unit
+    FROM gold_channel_catalog_experiment
+    WHERE series = ?
+At ~1K rows the table is tiny; no second catalog table is needed.
 
 Sources: gold_timeseries_agg_1min (base aggregate) + silver_dim_signal +
          bronze_filemeta (for file metadata in experiment_index).
@@ -64,13 +68,6 @@ def _existing_experiment_ids(spark: SparkSession, table: str) -> DataFrame:
     if not spark.catalog.tableExists(table):
         return spark.createDataFrame([], "experiment_id long")
     return spark.read.table(table).select("experiment_id").distinct()
-
-
-def _existing_series_channels(spark: SparkSession, table: str) -> DataFrame:
-    """Return existing (series, std_channel) pairs in the series catalog."""
-    if not spark.catalog.tableExists(table):
-        return spark.createDataFrame([], "series string, std_channel string")
-    return spark.read.table(table).select("series", "std_channel")
 
 
 # =============================================================================
@@ -183,12 +180,6 @@ def build_experiment_index(
     )
 
 
-def build_channel_catalog_series(signal_df: DataFrame, existing_df: DataFrame) -> DataFrame:
-    """New unique (series, std_channel, unit) not yet in the catalog."""
-    all_channels = signal_df.select("series", "std_channel", "unit").distinct()
-    return all_channels.join(existing_df, on=["series", "std_channel"], how="left_anti")
-
-
 def build_channel_catalog_experiment(
     signal_df: DataFrame, agg_1min: DataFrame,
 ) -> DataFrame:
@@ -240,7 +231,6 @@ def main():
 
     # Target serving tables
     index_table = build_table_name(catalog, schema_g, "gold", "experiment_index", args.is_integration_test)
-    catalog_series_table = build_table_name(catalog, schema_g, "gold", "channel_catalog_series", args.is_integration_test)
     catalog_exp_table = build_table_name(catalog, schema_g, "gold", "channel_catalog_experiment", args.is_integration_test)
     agg_15_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg_15min", args.is_integration_test)
     agg_60_table = build_table_name(catalog, schema_g, "gold", "timeseries_agg_60min", args.is_integration_test)
@@ -252,7 +242,6 @@ def main():
     logger.info(f"  Environment: {environment}")
     logger.info(f"  Source: {gold_agg_1min_table}")
     logger.info(f"  -> {index_table}")
-    logger.info(f"  -> {catalog_series_table}")
     logger.info(f"  -> {catalog_exp_table}")
     logger.info(f"  -> {agg_15_table}")
     logger.info(f"  -> {agg_60_table}")
@@ -302,18 +291,8 @@ def main():
     signal_new = signal_df.join(F.broadcast(new_experiment_ids), on="experiment_id", how="inner")
 
     # =========================================================================
-    # 1. CHANNEL CATALOGS (written before experiment_index for idempotency)
+    # 1. CHANNEL CATALOG (per-experiment availability)
     # =========================================================================
-    # Series-level catalog (append only new series+channel combinations)
-    existing_series_channels = _existing_series_channels(spark, catalog_series_table)
-    catalog_series_df = build_channel_catalog_series(signal_df, existing_series_channels)
-    series_count = catalog_series_df.count()
-    if series_count > 0:
-        loc = build_external_table_location(storage_account, gold_medal["adls_container"], gold_layer, "channel_catalog_series")
-        write_to_delta(catalog_series_df, catalog_series_table, mode="append", location=loc)
-    logger.info(f"  gold_channel_catalog_series: {series_count} new row(s)")
-
-    # Experiment-level catalog (per-experiment channel availability)
     catalog_exp_df = build_channel_catalog_experiment(signal_new, agg_1min)
     catalog_exp_count = catalog_exp_df.count()
     logger.info(f"  gold_channel_catalog_experiment: {catalog_exp_count} new row(s)")
@@ -342,7 +321,7 @@ def main():
     # 3. EXPERIMENT INDEX (commit marker — written LAST for idempotency)
     # =========================================================================
     # If the script is interrupted before this point, the next run will
-    # reprocess the same experiments (safe: catalogs use anti-join or are
+    # reprocess the same experiments (safe: catalog uses anti-join or is
     # append-only; agg tiers may see minor duplicates on rare retry).
     filemeta = spark.read.table(bronze_fm_table)
 
