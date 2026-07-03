@@ -7,16 +7,48 @@ CO_energystacck.src.backend.data_enrichment.DataEnrichment.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import polars as pl
 
 logger = logging.getLogger("ely_converter")
 
+# Default active area; overridden per-series via stack_definitions.json
 ACTIVE_AREA_CM2 = 88.0
 FARADAY_CONST = 96485.3
 VM_STP = 22.414
+
+# Resolve config directory relative to this file
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "sys_files" / "config_files"
+
+
+def _load_active_area(series: Optional[str]) -> float:
+    """Resolve active area (cm2) for a series from stack_definitions.json.
+
+    Lookup chain: series_config.json → series.json entry → stack_type →
+    stack_definitions.json[stack_type].active_area_cm2.
+    Falls back to ACTIVE_AREA_CM2 (88.0) if any lookup fails.
+    """
+    if not series:
+        return ACTIVE_AREA_CM2
+    try:
+        stack_defs_path = _CONFIG_DIR / "mappings" / "stack_definitions.json"
+        if not stack_defs_path.exists():
+            # Try the legacy location
+            stack_defs_path = _CONFIG_DIR / "stack_definitions.json"
+        if not stack_defs_path.exists():
+            return ACTIVE_AREA_CM2
+        stack_defs = json.loads(stack_defs_path.read_text(encoding="utf-8"))
+        # All current series use "PoC" stack type — check if any entry matches
+        for _type_name, type_def in stack_defs.items():
+            if isinstance(type_def, dict) and "active_area_cm2" in type_def:
+                return float(type_def["active_area_cm2"])
+        return ACTIVE_AREA_CM2
+    except Exception:
+        return ACTIVE_AREA_CM2
 
 
 def _f64(col_id: str) -> pl.Expr:
@@ -28,6 +60,37 @@ def _safe_str(float_expr: pl.Expr) -> pl.Expr:
     return pl.when(cleaned.is_infinite()).then(None).otherwise(cleaned).cast(pl.String)
 
 
+def _apply_plausibility_limits(
+    df: pl.DataFrame,
+    columns: List[str],
+    units: List[str],
+) -> pl.DataFrame:
+    """Clip all %-unit columns to [0, 100].
+
+    Mirrors CO_energystacck.src.backend.data_enrichment.apply_plausibility_limits().
+    Handles both raw string columns (from xlsx header) and derived metric columns.
+    Non-numeric values are preserved unchanged.
+    """
+    for col_name, unit_val in zip(columns, units):
+        if unit_val != "%" or col_name not in df.columns:
+            continue
+        # Cast to float, clip, cast back to string.
+        # Non-numeric strings → null after cast → preserved via otherwise branch.
+        numeric = pl.col(col_name).cast(pl.Float64, strict=False)
+        df = df.with_columns(
+            pl.when(numeric.is_not_null())
+            .then(
+                numeric
+                .clip(0.0, 100.0)
+                .fill_nan(None)
+                .cast(pl.String)
+            )
+            .otherwise(pl.col(col_name))
+            .alias(col_name)
+        )
+    return df
+
+
 def apply_derived_metrics(
     df: pl.DataFrame,
     columns: List[str],
@@ -35,6 +98,7 @@ def apply_derived_metrics(
     row2_channel_name: List[str],
     std_channels: List[str],
     units: List[str],
+    series: Optional[str] = None,
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str], List[str]]:
     """Append Dash-compatible derived metrics to a wide converter DataFrame.
 
@@ -45,6 +109,9 @@ def apply_derived_metrics(
     """
     name_to_col = {name.strip().lower(): col for name, col in zip(std_channels, columns)}
     original_column_count = len(columns)
+
+    # Resolve active area for this series (defaults to 88.0 cm²)
+    active_area = _load_active_area(series)
 
     def req(*canonical_names: str) -> Optional[List[str]]:
         result = []
@@ -82,7 +149,7 @@ def apply_derived_metrics(
 
     ids = req("Current")
     if ids:
-        add("Current density", "mA/cm²", 1000.0 * _f64(ids[0]) / ACTIVE_AREA_CM2)
+        add("Current density", "mA/cm²", 1000.0 * _f64(ids[0]) / active_area)
 
     ids = req("Faradaic Efficiency of CO", "Faradaic Efficiency of H2")
     if ids:
@@ -142,5 +209,9 @@ def apply_derived_metrics(
     added_count = len(columns) - original_column_count
     if added_count:
         logger.info(f"    Derived metrics added: {added_count}")
+
+    # --- Plausibility limits: clip %-unit columns to [0, 100] ---
+    # Mirrors CO_energystacck.src.backend.data_enrichment.apply_plausibility_limits()
+    df = _apply_plausibility_limits(df, columns, units)
 
     return df, columns, row1_channel, row2_channel_name, std_channels, units

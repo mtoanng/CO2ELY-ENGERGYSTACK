@@ -357,9 +357,9 @@ def _process_sheet(
     # Keep Bronze raw-ish: canonical channel mapping is applied in Silver.
     raw_lookup_channels = row2_channel_name.copy()
 
-    # --- Compute derived metrics before unpivot (12 formulas from CO_energystacck) ---
+    # --- Compute derived metrics + plausibility limits (mirrors CO_energystacck) ---
     df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units = apply_derived_metrics(
-        df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units
+        df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units, series=series
     )
 
     (
