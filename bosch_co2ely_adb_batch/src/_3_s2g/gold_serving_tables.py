@@ -111,9 +111,9 @@ def build_experiment_index(
       - avg_*  → weighted mean: sum(value_mean * value_count) / sum(value_count)
       - peak_* → max(value_max)
     """
-    # Join agg with signal dim to get std_channel for KPI filtering
+    # Inner join to narrow to valid signals (agg_1min already has std_channel)
     agg_with_channel = agg_1min.join(
-        F.broadcast(signal_df.select("signal_id", "std_channel").distinct()),
+        F.broadcast(signal_df.select("signal_id").distinct()),
         on="signal_id",
         how="inner",
     )
