@@ -88,10 +88,18 @@ def write_to_delta(df, table_name, mode="append", partition_by=None, location=No
     spark.conf.set("spark.databricks.delta.optimizeWrite.enabled", "true")
     spark.conf.set("spark.databricks.delta.autoCompact.enabled", "true")
 
+    # When creating a new external table via append, the ADLS location may
+    # contain stale files from a previous DROP TABLE (which removes the UC
+    # metastore entry but not the data). Switch to overwrite for the initial
+    # write — semantically equivalent since there's no existing table to append to.
+    effective_mode = mode
+    if location and mode == "append" and not spark.catalog.tableExists(table_name):
+        effective_mode = "overwrite"
+
     writer = (
         df.write
         .format("delta")
-        .mode(mode)
+        .mode(effective_mode)
         .option("mergeSchema", str(merge_schema).lower())
     )
     if partition_by:
