@@ -285,9 +285,25 @@ def _process_sheet(
 
     # Row 1: channel (original identifier) — used as join key in timeseries
     row1_channel = [str(header_df[c][0] or "") for c in col_names]
-    # Row 2: channel_name (display name)
-    row2_channel_name = [str(header_df[c][1] or "") for c in col_names]
-    row2_channel_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_channel_name)]
+    # Row 2: candidate channel_name (display name) — but may actually be units
+    row2_raw = [str(header_df[c][1] or "") for c in col_names]
+
+    # Detect if Row 2 is a units row (2-row header: name + unit, no separate Row 3 units).
+    # Common in derived/calculated measurement sheets where Row 1 has descriptive
+    # names and Row 2 has unit symbols like '%', 'V', 'bar', '°C'.
+    row2_is_units = detect_units_row(row2_raw)
+
+    if row2_is_units:
+        # Row 1 = descriptive names (both identifier AND display name)
+        # Row 2 = units (NOT a display name)
+        row2_channel_name = [str(header_df[c][0] or "") for c in col_names]
+        row2_channel_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_channel_name)]
+        units = [v.strip() if v else "" for v in row2_raw]
+        logger.info(f"    Row 2 detected as units row (2-row header format)")
+    else:
+        # Normal 3-row header: Row 1 = identifier, Row 2 = display name
+        row2_channel_name = [name if name.strip() else f"Column_{i}" for i, name in enumerate(row2_raw)]
+        units = [""] * n_cols
 
     # Ensure unique channel identifiers
     seen = {}
@@ -302,16 +318,21 @@ def _process_sheet(
             unique_channels.append(ch)
     row1_channel = unique_channels
 
-    # Row 3: unit detection
-    has_units = False
-    units = [""] * n_cols
-    if header_df.shape[0] >= 3:
+    # Row 3: unit detection (only if Row 2 was not already units)
+    has_units = row2_is_units  # if Row 2 was units, we already have them
+    if not has_units and header_df.shape[0] >= 3:
         row3_values = [str(header_df[c][2] or "") for c in col_names]
         has_units = detect_units_row(row3_values)
         if has_units:
             units = [v.strip() if v else "" for v in row3_values]
 
-    data_start_row = 3 if has_units else 2
+    # data_start_row: skip header rows before actual measurement data
+    # - 3-row header (Row 1 + Row 2 + Row 3 units): skip 3
+    # - 2-row header (Row 1 + Row 2 as units OR Row 1 + Row 2 name): skip 2
+    if row2_is_units:
+        data_start_row = 2  # Row 0=names, Row 1=units, Row 2+=data
+    else:
+        data_start_row = 3 if has_units else 2
     if header_df.shape[0] <= data_start_row:
         return None
 
