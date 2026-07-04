@@ -146,6 +146,7 @@ SCHEMAS = {
         ("last_modified", pa.timestamp("us")),
         ("ingested_timestamp", pa.timestamp("us")),
         ("series", pa.string()),
+        ("group", pa.string()),
     ]),
     "channel": pa.schema([
         ("uuid", pa.string()),

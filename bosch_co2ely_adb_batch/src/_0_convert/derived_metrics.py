@@ -109,12 +109,18 @@ def apply_derived_metrics(
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str], List[str]]:
     """Append Dash-compatible derived metrics to a wide converter DataFrame.
 
-    Input lookup uses the provided channel lookup names. In the Bronze path
-    these are raw row-2 labels; Silver is responsible for canonical mapping.
-    Missing inputs skip the formula. Outputs are strings so the existing unpivot
-    cast chain produces `value` and `value_str` consistently.
+    Input lookup uses canonical / std-channel names when available, falling back
+    to raw identifiers. This lets converter-stage formulas resolve series-specific
+    mappings without moving full canonical mapping ownership out of Silver.
+    Outputs are strings so the existing unpivot cast chain produces `value` and
+    `value_str` consistently.
     """
-    name_to_col = {name.strip().lower(): col for name, col in zip(std_channels, columns)}
+    name_to_col: dict[str, str] = {}
+    for col_id, raw_name, std_name in zip(columns, row2_channel_name, std_channels):
+        for candidate in (std_name, raw_name, col_id):
+            normalized = str(candidate or "").strip().lower()
+            if normalized and normalized not in name_to_col:
+                name_to_col[normalized] = col_id
     original_column_count = len(columns)
 
     # Resolve active area for this series (defaults to 88.0 cm²)

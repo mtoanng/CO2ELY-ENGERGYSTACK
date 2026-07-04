@@ -354,12 +354,23 @@ def _process_sheet(
     if n_rows == 0:
         return None
 
-    # Keep Bronze raw-ish: canonical channel mapping is applied in Silver.
-    raw_lookup_channels = row2_channel_name.copy()
+    # Build a converter-local std-channel lookup from mapping so derived metrics
+    # can resolve canonical names before full Silver mapping ownership begins.
+    std_lookup_channels = row2_channel_name.copy()
+    if mapping:
+        normalized_mapping = {
+            str(entry.get("file_column") or "").strip().lower(): str(entry.get("schema_column") or "")
+            for entry in mapping
+            if str(entry.get("file_column") or "").strip()
+        }
+        std_lookup_channels = [
+            normalized_mapping.get(str(name or "").strip().lower(), name)
+            for name in row2_channel_name
+        ]
 
     # --- Compute derived metrics + plausibility limits (mirrors CO_energystacck) ---
-    df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units = apply_derived_metrics(
-        df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units, series=series
+    df, columns, row1_channel, row2_channel_name, std_lookup_channels, units = apply_derived_metrics(
+        df, columns, row1_channel, row2_channel_name, std_lookup_channels, units, series=series
     )
 
     (
@@ -370,7 +381,7 @@ def _process_sheet(
         signal_units,
         timestamp_column,
         elapsed_column,
-    ) = _split_structural_channels(columns, row1_channel, row2_channel_name, raw_lookup_channels, units)
+    ) = _split_structural_channels(columns, row1_channel, row2_channel_name, std_lookup_channels, units)
 
     # n_channels and channel catalog include signal/derived channels only.
     # Structural timestamp/elapsed columns are repeated on timeseries rows.
