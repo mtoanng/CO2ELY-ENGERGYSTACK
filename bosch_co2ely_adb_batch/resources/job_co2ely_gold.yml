@@ -10,6 +10,8 @@ common_gold_job_settings: &common_gold_job_settings
   permissions:
     - group_name: "idm2bcd_dssi03prod_co2elyd_data"
       level: "CAN_MANAGE"
+    - user_name: "nlu8hc@bosch.com"
+      level: "CAN_MANAGE"
   max_concurrent_runs: 2
   job_clusters:
     - job_cluster_key: job_cluster

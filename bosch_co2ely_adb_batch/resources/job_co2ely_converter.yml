@@ -61,6 +61,8 @@ _converter_job_base: &converter_job_base
   permissions:
     - group_name: "idm2bcd_dssi03prod_co2elyd_data"
       level: "CAN_MANAGE"
+    - user_name: "nlu8hc@bosch.com"
+      level: "CAN_MANAGE"
   max_concurrent_runs: 1
 
 # --- Shared library set ---
