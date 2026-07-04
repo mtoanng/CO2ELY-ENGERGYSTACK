@@ -1,15 +1,7 @@
-"""System: Validate Delta table integrity across all pipeline layers.
+"""System validation for pipeline tables across bronze, silver, and gold.
 
-Checks (in order):
-  1. Tables exist and are readable
-  2. Row counts are non-zero (expected for a populated pipeline)
-  3. Key columns present (spot-check, not exhaustive schema enforcement)
-  4. Cross-layer referential integrity:
-       silver dim_signal experiment_ids ⊆ silver dim_experiment
-       gold experiment_ids ⊆ silver dim_experiment
-  5. Gold serving completeness: experiment_index covers all gold experiments
-
-Exits non-zero on any failure when --fail_on_error=true (default).
+Checks table availability, key columns, and selected cross-layer integrity
+relationships.
 """
 import sys
 import json

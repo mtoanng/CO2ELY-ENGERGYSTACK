@@ -1,8 +1,7 @@
 """Derived metric formulas for the converter stage.
 
-The demo pipeline computes derived engineering metrics before unpivoting so the
-metrics land in bronze/gold as normal channels. Formulas mirror
-CO_energystacck.src.backend.data_enrichment.DataEnrichment.
+Derived channels are calculated on the sheet-level wide frame before unpivot so
+that downstream layers treat them as standard measurement channels.
 """
 
 from __future__ import annotations
@@ -63,18 +62,7 @@ def _apply_plausibility_limits(
     columns: List[str],
     units: List[str],
 ) -> pl.DataFrame:
-    """Clip all %-unit columns to [0, 100].
-
-    Mirrors CO_energystacck.src.backend.data_enrichment.apply_plausibility_limits().
-
-    Unit source: the `units` list, populated from:
-    - xlsx header detection (Row 3 units row, or Row 2 if detected as units)
-    - explicit unit declarations in derived metric add() calls
-
-    This covers all cases because:
-    - 3-row header files: Row 3 has units → "%" detected
-    - 2-row header files (name + unit): Row 2 detected as units → "%" detected
-    - Derived metrics: always declare unit explicitly (e.g. add("Energy Efficiency", "%", ...))
+    """Clip percentage-based channels to the closed interval [0, 100].
 
     Non-numeric values are preserved unchanged.
     """
@@ -107,13 +95,11 @@ def apply_derived_metrics(
     units: List[str],
     series: Optional[str] = None,
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str], List[str]]:
-    """Append Dash-compatible derived metrics to a wide converter DataFrame.
+    """Append derived metric channels to the sheet-level converter frame.
 
-    Input lookup uses canonical / std-channel names when available, falling back
-    to raw identifiers. This lets converter-stage formulas resolve series-specific
-    mappings without moving full canonical mapping ownership out of Silver.
-    Outputs are strings so the existing unpivot cast chain produces `value` and
-    `value_str` consistently.
+    Input lookup prefers canonical channel names when available and falls back
+    to raw identifiers. Outputs remain string-based so the downstream unpivot
+    path can populate numeric and string value columns consistently.
     """
     name_to_col: dict[str, str] = {}
     for col_id, raw_name, std_name in zip(columns, row2_channel_name, std_channels):

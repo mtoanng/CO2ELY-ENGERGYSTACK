@@ -1,14 +1,10 @@
-"""Silver DQ task for Bronze timeseries facts.
+"""Data quality evaluation for bronze timeseries records.
 
-Evaluates a composable rule matrix against bronze_timeseries and writes:
-    silver_dim_dq_rule
-    silver_fact_timeseries_dq_result
-    silver_fact_timeseries_dq_summary
-
-Usage (via Databricks job):
-    spark_python_task:
-        python_file: ../src/_2_b2s/dq_timeseries.py
-        parameters: ["--env", "dev", "--is_integration_test", "false"]
+Outputs:
+- `silver_dim_dq_rule`
+- `silver_fact_timeseries_dq_result`
+- `silver_fact_timeseries_dq_summary`
+- `silver_fact_timeseries_clean` when clean-table output is enabled
 """
 
 import sys

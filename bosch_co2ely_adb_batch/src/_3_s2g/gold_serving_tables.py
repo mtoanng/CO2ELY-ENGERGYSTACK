@@ -1,37 +1,15 @@
-"""Gold serving tables: app-oriented surfaces for fast dashboard queries.
+"""Gold serving tables for query-oriented application access.
 
-Produces tables optimized for the Plotly.js reporting frontend:
+Outputs:
+- `gold_timeseries_agg_15min`
+- `gold_timeseries_agg_60min`
+- `gold_experiment_index`
+- `gold_channel_catalog_experiment`
 
-  gold_timeseries_agg_15min  — 15-minute elapsed-time bins (overview).
-  gold_timeseries_agg_60min  — 60-minute elapsed-time bins (long experiments).
-  gold_experiment_index      — merged metadata + KPI summary per experiment.
-  gold_channel_catalog_experiment — per-experiment channel availability.
-
-All tables are append-only.  Incrementality is by experiment_id: only new
-experiments not yet present in the target are processed.
-
-Idempotency contract:
-  - experiment_index is written LAST (commit marker). If the script is
-    interrupted, the next run reprocesses the same experiments.
-  - channel_catalog_experiment and agg tiers may see duplicates on retry
-    (extremely rare — requires job failure between writes within a single run).
-  - Only experiments that EXIST in gold_timeseries_agg_1min are processed,
-    making it safe to run even if gold_timeseries_view hasn't completed.
-
-Series-level channel picker is derived at query time from gold_channel_catalog_experiment:
-    SELECT DISTINCT series, std_channel, unit
-    FROM gold_channel_catalog_experiment
-    WHERE series = ?
-At ~1K rows the table is tiny; no second catalog table is needed.
-
-Sources: gold_timeseries_agg_1min (base aggregate) + silver_dim_signal +
-         bronze_filemeta (for file metadata in experiment_index).
-Must run AFTER gold_timeseries_view completes.
-
-Usage (via Databricks job):
-    spark_python_task:
-        python_file: ../src/_3_s2g/gold_serving_tables.py
-        parameters: ["--env", "dev", "--is_integration_test", "false"]
+Sources:
+- `gold_timeseries_agg_1min`
+- `silver_dim_signal`
+- `bronze_filemeta`
 """
 
 import sys
@@ -160,7 +138,7 @@ def build_experiment_index(
     exp_identity = signal_df.select("experiment_id", "series", "uuid", "group").distinct()
     experiment_stats = experiment_stats.join(exp_identity, on="experiment_id", how="left")
 
-    # File metadata enrichment (join on uuid + group to avoid sheet-level fan-out)
+    # File metadata enrichment at sheet grain.
     fm = filemeta_df.select(
         "uuid",
         "group",

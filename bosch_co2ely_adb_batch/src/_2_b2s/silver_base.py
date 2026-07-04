@@ -1,18 +1,7 @@
-"""Silver base layer — DEPRECATED.
+"""Compatibility entry point for the silver layer.
 
-This module previously published bronze tables as silver dim/fact copies.
-Silver dimensions are now handled by dedicated scripts:
-  - silver_dim_experiment.py  (assigns experiment_id)
-  - silver_dim_signal.py      (assigns signal_id + std_channel mapping)
-
-This file is retained as a no-op entry point so existing job references
-don't break during the migration. It can be removed once all job YAMLs
-are updated to point to the new scripts directly.
-
-Usage (via Databricks job):
-    spark_python_task:
-        python_file: ../src/_2_b2s/silver_base.py
-        parameters: ["--env", "dev", "--is_integration_test", "false"]
+This module does not publish silver tables directly. The active silver outputs
+are produced by the dedicated dimension jobs.
 """
 
 import sys
@@ -36,7 +25,7 @@ logger = configure_logger("silver_base")
 
 
 def main():
-    """No-op — silver dims are now built by dedicated scripts."""
+    """Log the active silver entry points and exit."""
     args = get_job_args()
     spark = SparkSession.builder.getOrCreate()
 

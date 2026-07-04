@@ -1,4 +1,4 @@
-# Silver data quality job: evaluates Bronze timeseries DQ rules and writes Silver DQ metadata.
+# Silver data quality job for bronze timeseries validation and DQ outputs.
 
 common_dq_job_settings: &common_dq_job_settings
   parameters:

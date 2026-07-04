@@ -1,69 +1,79 @@
-# CO-ESTACK-ADB / co_energystack_pipeline
+# CO2ELY Databricks Pipeline
 
-Production Databricks batch pipeline for CO₂ electrolysis analytics.  
-**Migrated from** the CO_energystacck Dash app (Azure App Service) to Databricks Jobs.
+Databricks batch pipeline for CO₂ electrolysis analytics, packaged as a Databricks Asset Bundle.
 
-Built as a **Declarative Automation Bundle** (DAB).
+## Overview
 
-## Key Migration Decisions
+The pipeline processes sheet-based XLSX measurements into curated analytical tables for downstream querying.
 
-| App (CO_energystacck) | Pipeline (CO-ESTACK-ADB) |
-| --- | --- |
-| Polars + calamine for xlsx | Same — no Spark Excel JAR needed |
-| Local `/home/data/` + ADLS sync | UC Volumes → Delta tables |
-| Single-user App Service | Multi-env: dev/qa/prod |
-| In-app enrichment | Reusable polars_engine wheel |
-| Dash frontend reads Parquet | Frontend reads from gold Delta/views |
+High-level flow:
 
-## Architecture
-
-```
-UC Volume (.xlsx uploads)
-    │
-    ▼ _1_r2b (Polars calamine)
-┌─────────────────────┐
-│  Bronze Delta Table │  bronze_co2_timeseries
-└─────────────────────┘
-    │
-    ▼ _2_b2s (Polars)
-┌─────────────────────┐
-│  Silver Enriched    │  silver_co2_timeseries_enriched (12 metrics)
-│  Silver Aggregated  │  silver_co2_timeseries_aggregated (15-min bins)
-└─────────────────────┘
-    │
-    ▼ _3_s2g
-┌─────────────────────┐
-│  Gold Summary       │  gold_co2_summary_statistics (KPIs)
-│  Gold Dashboard     │  gold_co2_timeseries_dashboard (chart data)
-└─────────────────────┘
+```text
+Raw XLSX files
+-> converter parquet outputs
+-> bronze Delta tables
+-> silver dimensions
+-> gold timeseries and 1-minute aggregates
+-> serving aggregates and experiment index
+-> SQL Warehouse / application queries
 ```
 
-## Repo Structure (for CO-ESTACK-ADB)
+## Data Flow
 
+### Converter
+- Reads XLSX / XLS files from storage
+- Resolves series-specific mapping metadata
+- Normalizes structural time columns
+- Computes derived metrics
+- Applies plausibility clipping for percentage-based metrics
+- Writes raw parquet datasets:
+  - `filemeta`
+  - `channel`
+  - `timeseries`
+  - `statistics`
+
+### Bronze
+- Ingests converter parquet outputs with Auto Loader
+- Publishes Delta tables:
+  - `bronze_filemeta`
+  - `bronze_channel`
+  - `bronze_timeseries`
+  - `bronze_statistics`
+
+### Silver
+- Creates experiment identity from `uuid + group`
+- Creates signal identity and canonical channel mapping
+- Publishes Delta tables:
+  - `silver_dim_experiment`
+  - `silver_dim_signal`
+
+### Gold
+- Joins bronze timeseries with silver signal metadata
+- Publishes:
+  - `gold_timeseries`
+  - `gold_timeseries_agg_1min`
+
+### Serving
+- Re-aggregates 1-minute gold data into coarser query surfaces
+- Publishes:
+  - `gold_timeseries_agg_15min`
+  - `gold_timeseries_agg_60min`
+  - `gold_channel_catalog_experiment`
+  - `gold_experiment_index`
+
+## Jobs
+
+The end-to-end job runs the following stages sequentially:
+
+```text
+job_co2ely_converter
+-> job_co2ely_bronze
+-> job_co2ely_silver
+-> job_co2ely_gold
+-> job_co2ely_serving
 ```
-CO-ESTACK-ADB/                          ← Git repo root
-└── co_energystack_pipeline/            ← Bundle root
-    ├── databricks.yml
-    ├── .gitignore
-    ├── resources/
-    │   ├── job_co2ely_bronze.yml
-    │   ├── job_co2ely_silver.yml
-    │   ├── job_co2ely_gold.yml
-    │   └── job_co2ely_e2e.yml
-    └── src/
-        ├── __init__.py
-        ├── _1_r2b/
-        │   └── ingest_excel_to_bronze.py
-        ├── _2_b2s/
-        │   ├── enrich_timeseries.py
-        │   └── aggregate_timeseries.py
-        ├── _3_s2g/
-        │   ├── gold_summary_statistics.py
-        │   └── gold_timeseries_view.py
-        └── _5_common/
-            ├── common_utils.py
-            └── common_io_utils.py
-```
+
+The bundle also defines integration-test variants for the stage jobs.
 
 ## Quick Start
 
@@ -71,35 +81,31 @@ CO-ESTACK-ADB/                          ← Git repo root
 # Validate bundle
 databricks bundle validate -t dev_user
 
-# Deploy to personal dev workspace
+# Deploy to personal workspace
 databricks bundle deploy -t dev_user
 
-# Run end-to-end pipeline
+# Run the full pipeline
 databricks bundle run job_co2ely_e2e -t dev_user
-
-# Deploy to production
-databricks bundle deploy -t prod
 ```
 
 ## Environments
 
-| Target | Workspace | Schedule |
+| Target | Purpose | Schedule |
 | --- | --- | --- |
-| dev_user | DEV (personal) | Manual |
-| dev | DEV (shared, SP) | Manual |
-| qa | QA (SP) | Manual |
-| prod | PROD (SP) | 18:00 MON-FRI Amsterdam |
+| dev_user | Personal development workspace | Manual |
+| dev | Shared development workspace | Manual |
+| qa | Quality assurance workspace | Manual |
+| prod | Production workspace | Weekdays 18:00 Europe/Amsterdam |
 
 ## Dependencies
 
-- `polars[calamine]>=1.0` — Excel reads + enrichment engine
-- PySpark (cluster runtime) — Delta I/O
-- No external JARs required
+- `polars[calamine]>=1.0`
+- `fastexcel`
+- `azure-storage-blob>=12.19`
+- `azure-identity>=1.15`
+- PySpark runtime on Databricks clusters
 
-## TODOs
+## Reference
 
-- [ ] Package polars_engine as a wheel (share between app and pipeline)
-- [ ] Add config CSV for dynamic source discovery (like bosch_ely_adb_batch bronze_config)
-- [ ] Add DQM task (data quality monitoring)
-- [ ] Add ADLS Parquet sync for Dash app reads
-- [ ] Wire integration tests
+- End-to-end lineage spec: `docs/lineage_e2e_excalidraw_spec.md`
+- Excalidraw lineage diagram: `docs/lineage_e2e.excalidraw`

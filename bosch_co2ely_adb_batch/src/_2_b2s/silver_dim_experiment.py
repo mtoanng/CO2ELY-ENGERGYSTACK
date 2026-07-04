@@ -1,27 +1,8 @@
-"""Silver dimension: Experiment identity table.
+"""Experiment identity dimension.
 
-Assigns a deterministic `experiment_id` (BIGINT) to each unique (uuid, group)
-pair across the dataset.  This is the canonical experiment identity used by all
-downstream Gold fact tables.
-
-Key design decisions:
-  - experiment_id = xxhash64(uuid, group) → deterministic, stateless, idempotent.
-    No sequential counter coordination, no merge-race risk.
-  - Incremental append: only new (uuid, group) pairs are written each run.
-  - Source: bronze_filemeta (uuid, series) + bronze_statistics (uuid, group).
-  - Only experiments with a known series (from filemeta) are registered.
-    Orphan statistics without filemeta are logged as warnings.
-
-Output table: silver_dim_experiment
-    experiment_id  BIGINT   -- xxhash64(uuid, group)
-    uuid           STRING   -- file identifier
-    group          STRING   -- sheet name within file
-    series         STRING   -- from filemeta (folder path classification)
-
-Usage (via Databricks job):
-    spark_python_task:
-        python_file: ../src/_2_b2s/silver_dim_experiment.py
-        parameters: ["--env", "dev", "--is_integration_test", "false"]
+Creates a deterministic experiment identifier for each `uuid + group` pair and
+publishes the sheet-level experiment dimension used by downstream analytical
+layers.
 """
 
 import sys
@@ -133,7 +114,7 @@ def main():
     statistics_df = spark.read.table(bronze_stats_table)
     all_experiments = build_dim_experiment(filemeta_df, statistics_df)
 
-    # DQ check: detect orphan sheets without filemeta (would have been NULL series)
+    # Warn if statistics rows do not have matching file metadata.
     orphan_sheets = (
         statistics_df.select("uuid", "group").distinct()
         .join(filemeta_df.select("uuid").distinct(), on="uuid", how="left_anti")

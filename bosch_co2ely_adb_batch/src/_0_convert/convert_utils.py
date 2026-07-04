@@ -1,29 +1,13 @@
-"""ELY Data Converter - shared utilities.
+"""Shared utilities for the XLSX converter stage.
 
-Architecture: Distributed Polars on Spark Workers + Azure SDK.
-- Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
-- I/O: Azure Storage SDK (parallel HTTP download/upload, zero JVM).
-- Distribution: Spark mapPartitions distributes blob paths to workers.
-- Parsing: Polars + calamine (Rust-native). Never touches JVM heap.
-- Environment: auto-detected from workspace URL (dev/qa/prod).
+The converter produces four parquet-ready table types:
+- `filemeta`
+- `channel`
+- `timeseries`
+- `statistics`
 
-4 output tables: filemeta, channel, timeseries, statistics.
-Join key: UUID (deterministic UUID5 from relative blob path).
-
-Schema naming:
-- channel.channel_id = original column identifier (row 1 header)
-- channel.raw_channel = display name (row 2 header)
-- channel.unit = measurement unit (row 3 if detected)
-- timeseries.channel_id = references channel.channel_id (the original identifier)
-- timeseries.timestamp / elapsed_time_s = preserved structural columns, not signal rows
-
-Header logic (scan first 3 rows):
-- Row 1: channel_id (original column identifier/description)
-- Row 2: raw_channel (display name)
-- Row 3: if cells contain special chars or are single-char -> unit
-         else -> first data row (timeseries starts here)
-
-Timeseries: signal-only wide->long melt with sample_offset plus structural time.
+The deterministic file UUID is the primary source-side identifier used across
+converter outputs.
 """
 import os
 import re
