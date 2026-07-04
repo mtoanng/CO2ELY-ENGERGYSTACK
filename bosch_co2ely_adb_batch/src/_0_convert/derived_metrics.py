@@ -7,11 +7,10 @@ CO_energystacck.src.backend.data_enrichment.DataEnrichment.
 
 from __future__ import annotations
 
-import csv
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import polars as pl
 
@@ -24,37 +23,6 @@ VM_STP = 22.414
 
 # Resolve config directory relative to this file
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "sys_files" / "config_files"
-
-# Cache for schema units (loaded once)
-_schema_units_cache: Optional[Dict[str, str]] = None
-
-
-def _load_schema_units() -> Dict[str, str]:
-    """Load {channel_name: unit} dict from schema.csv (cached).
-
-    Provides the authoritative unit catalogue identical to the original app's
-    ``data_enrichment.load_units_from_schema()``. Used as a FALLBACK when the
-    xlsx header row detection doesn't provide units for a channel.
-    """
-    global _schema_units_cache
-    if _schema_units_cache is not None:
-        return _schema_units_cache
-
-    schema_path = _CONFIG_DIR / "schema.csv"
-    units: Dict[str, str] = {}
-    if schema_path.exists():
-        try:
-            with open(schema_path, "r", encoding="utf-8-sig") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    name = (row.get("name") or "").strip()
-                    unit = (row.get("unit") or "").strip()
-                    if name and unit:
-                        units[name] = unit
-        except Exception as exc:
-            logger.warning(f"Failed to load schema.csv: {exc}")
-    _schema_units_cache = units
-    return units
 
 
 def _load_active_area(series: Optional[str]) -> float:
@@ -69,12 +37,10 @@ def _load_active_area(series: Optional[str]) -> float:
     try:
         stack_defs_path = _CONFIG_DIR / "mappings" / "stack_definitions.json"
         if not stack_defs_path.exists():
-            # Try the legacy location
             stack_defs_path = _CONFIG_DIR / "stack_definitions.json"
         if not stack_defs_path.exists():
             return ACTIVE_AREA_CM2
         stack_defs = json.loads(stack_defs_path.read_text(encoding="utf-8"))
-        # All current series use "PoC" stack type — check if any entry matches
         for _type_name, type_def in stack_defs.items():
             if isinstance(type_def, dict) and "active_area_cm2" in type_def:
                 return float(type_def["active_area_cm2"])
@@ -96,35 +62,25 @@ def _apply_plausibility_limits(
     df: pl.DataFrame,
     columns: List[str],
     units: List[str],
-    std_channels: List[str],
 ) -> pl.DataFrame:
     """Clip all %-unit columns to [0, 100].
 
     Mirrors CO_energystacck.src.backend.data_enrichment.apply_plausibility_limits().
 
-    Unit detection uses TWO sources (matching the original app exactly):
-    1. Header-detected units from the xlsx (passed in `units` list)
-    2. Schema.csv fallback (authoritative channel→unit catalogue)
+    Unit source: the `units` list, populated from:
+    - xlsx header detection (Row 3 units row, or Row 2 if detected as units)
+    - explicit unit declarations in derived metric add() calls
 
-    The original app ALWAYS uses schema.csv (via load_units_from_schema()) to
-    determine which columns are %. The batch pipeline's primary source is the
-    xlsx header, but schema.csv acts as fallback for files without a units row.
-    This ensures raw channels like "Faradaic Efficiency of O2" are clipped even
-    when the xlsx header didn't include a detectable units row.
+    This covers all cases because:
+    - 3-row header files: Row 3 has units → "%" detected
+    - 2-row header files (name + unit): Row 2 detected as units → "%" detected
+    - Derived metrics: always declare unit explicitly (e.g. add("Energy Efficiency", "%", ...))
 
     Non-numeric values are preserved unchanged.
     """
-    schema_units = _load_schema_units()
-
-    for col_name, unit_val, std_name in zip(columns, units, std_channels):
-        # Determine effective unit: prefer header-detected, fall back to schema
-        effective_unit = unit_val if unit_val else schema_units.get(std_name, "")
-        if not effective_unit:
-            effective_unit = schema_units.get(col_name, "")
-
-        if effective_unit != "%" or col_name not in df.columns:
+    for col_name, unit_val in zip(columns, units):
+        if unit_val != "%" or col_name not in df.columns:
             continue
-
         # Cast to float, clip, cast back to string.
         # Non-numeric strings → null after cast → preserved via otherwise branch.
         numeric = pl.col(col_name).cast(pl.Float64, strict=False)
@@ -262,7 +218,8 @@ def apply_derived_metrics(
         logger.info(f"    Derived metrics added: {added_count}")
 
     # --- Plausibility limits: clip %-unit columns to [0, 100] ---
-    # Uses BOTH header-detected units AND schema.csv fallback to match original.
-    df = _apply_plausibility_limits(df, columns, units, std_channels)
+    # Relies on header-detected units + explicit derived metric units.
+    # No external schema file needed.
+    df = _apply_plausibility_limits(df, columns, units)
 
     return df, columns, row1_channel, row2_channel_name, std_channels, units
