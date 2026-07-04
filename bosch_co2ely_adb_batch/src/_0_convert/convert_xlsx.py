@@ -376,7 +376,7 @@ def _process_sheet(
     # Structural timestamp/elapsed columns are repeated on timeseries rows.
     n_channels = len(signal_columns)
 
-    # file_path: full abfss:// URI if available, else relative_path
+    # filemeta is per-sheet (group level) so downstream joins stay 1:1.
     filemeta = build_filemeta(
         abfss_file_path or relative_path,
         file_uuid,
