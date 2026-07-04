@@ -488,8 +488,9 @@ def build_filemeta(
     file_path: str, file_uuid: str, file_size: int,
     last_modified: Optional[datetime],
     series: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> pa.Table:
-    """Build filemeta PyArrow table (1 row per file).
+    """Build filemeta PyArrow table (1 row per file-group).
 
     Args:
         file_path: Full abfss:// URI or relative path for traceability.
@@ -499,10 +500,11 @@ def build_filemeta(
         series: Governed series name resolved from the ADLS source folder
             during channel-mapping lookup (e.g. "PoC Stack VI"). None if no
             configured series folder matched the file's relative path.
+        group: Group identifier for the sheet / logical subgroup.
 
     Returns:
         PyArrow Table with schema: uuid, file_path, raw_file_name, file_size,
-        last_modified, ingested_timestamp, series.
+        last_modified, ingested_timestamp, series, group.
     """
     now = datetime.now(tz=timezone.utc)
     return pa.table({
@@ -513,6 +515,7 @@ def build_filemeta(
         "last_modified": [last_modified],
         "ingested_timestamp": [now],
         "series": [series],
+        "group": [group],
     }, schema=SCHEMAS["filemeta"])
 
 

@@ -377,7 +377,14 @@ def _process_sheet(
     n_channels = len(signal_columns)
 
     # file_path: full abfss:// URI if available, else relative_path
-    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified, series)
+    filemeta = build_filemeta(
+        abfss_file_path or relative_path,
+        file_uuid,
+        file_size,
+        last_modified,
+        series,
+        group=sheet_name,
+    )
     channel = build_channel(file_uuid, sheet_name, signal_row1, signal_row2, signal_units)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 

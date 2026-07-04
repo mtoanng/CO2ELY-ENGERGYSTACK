@@ -160,15 +160,16 @@ def build_experiment_index(
     exp_identity = signal_df.select("experiment_id", "series", "uuid", "group").distinct()
     experiment_stats = experiment_stats.join(exp_identity, on="experiment_id", how="left")
 
-    # File metadata enrichment (join on uuid)
+    # File metadata enrichment (join on uuid + group to avoid sheet-level fan-out)
     fm = filemeta_df.select(
         "uuid",
+        "group",
         F.col("raw_file_name").alias("source_file_name"),
         F.col("file_size").alias("source_file_size"),
         F.col("last_modified").alias("source_last_modified"),
         F.col("ingested_timestamp").alias("ingested_at"),
     )
-    experiment_stats = experiment_stats.join(fm, on="uuid", how="left")
+    experiment_stats = experiment_stats.join(fm, on=["uuid", "group"], how="left")
 
     return experiment_stats.select(
         "experiment_id", "series", "uuid", "group",
