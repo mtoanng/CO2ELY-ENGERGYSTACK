@@ -1,21 +1,14 @@
 # CO-ESTACK-ADB / co_energystack_pipeline
 
 Production Databricks batch pipeline for CO₂ electrolysis analytics.  
-**Migrated from** the CO_energystacck Dash app (Azure App Service) to Databricks Jobs.
 
 Built as a **Declarative Automation Bundle** (DAB).
 
-## Key Migration Decisions
-
-| App (CO_energystacck) | Pipeline (CO-ESTACK-ADB) |
-| --- | --- |
-| Polars + calamine for xlsx | Same — no Spark Excel JAR needed |
-| Local `/home/data/` + ADLS sync | UC Volumes → Delta tables |
-| Single-user App Service | Multi-env: dev/qa/prod |
-| In-app enrichment | Reusable polars_engine wheel |
-| Dash frontend reads Parquet | Frontend reads from gold Delta/views |
-
 ## Architecture
+
+<img width="1085" height="616" alt="image" src="https://github.com/user-attachments/assets/97d7ee5c-0ab7-48cf-ab0b-32b959715e52" />
+
+
 
 ```
 UC Volume (.xlsx uploads)
