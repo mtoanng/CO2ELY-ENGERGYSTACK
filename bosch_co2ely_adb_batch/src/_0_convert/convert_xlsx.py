@@ -1,24 +1,8 @@
-"""XLSX/XLS -> Parquet converter.
+"""XLSX / XLS sheet converter.
 
-Same 3-row header logic as CSV, applied per sheet.
-CRITICAL: NO Float64 pre-cast. Raw strings go to generic_unpivot() which
-handles type splitting correctly (cast chain works on String input).
-
-Schema:
-- DataFrame columns are named by ROW 1 (channel_id = original identifier)
-- raw_channel = ROW 2 (display name)
-- timeseries.channel_id references channel.channel_id (row 1) for joins
-- timestamp and elapsed time are preserved as structural columns, not signal rows
-
-I/O: Receives raw bytes (downloaded by Azure SDK in worker).
-Polars + calamine engine (Rust-native parsing, releases GIL).
-Parallelism: Sheets are processed in parallel via ThreadPoolExecutor.
-
-Memory safety:
-- Large sheets (n_rows * n_cols > TIMESERIES_CHUNK_THRESHOLD) use chunked unpivot:
-  process CHUNK_ROWS at a time -> write Parquet row groups to temp file.
-  Peak memory bounded to chunk_size * n_cols * ~80 bytes regardless of file size.
-- Sheet threads capped at MAX_SHEET_THREADS to prevent thread explosion.
+The converter reads workbook sheets, normalizes structural time fields,
+computes derived channels, and produces parquet-ready table outputs for the
+converter stage.
 """
 import io
 import re
@@ -354,12 +338,23 @@ def _process_sheet(
     if n_rows == 0:
         return None
 
-    # Keep Bronze raw-ish: canonical channel mapping is applied in Silver.
-    raw_lookup_channels = row2_channel_name.copy()
+    # Build a converter-local std-channel lookup from mapping so derived metrics
+    # can resolve canonical names before full Silver mapping ownership begins.
+    std_lookup_channels = row2_channel_name.copy()
+    if mapping:
+        normalized_mapping = {
+            str(entry.get("file_column") or "").strip().lower(): str(entry.get("schema_column") or "")
+            for entry in mapping
+            if str(entry.get("file_column") or "").strip()
+        }
+        std_lookup_channels = [
+            normalized_mapping.get(str(name or "").strip().lower(), name)
+            for name in row2_channel_name
+        ]
 
-    # --- Compute derived metrics before unpivot (12 formulas from CO_energystacck) ---
-    df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units = apply_derived_metrics(
-        df, columns, row1_channel, row2_channel_name, raw_lookup_channels, units
+    # --- Compute derived metrics + plausibility limits (mirrors CO_energystacck) ---
+    df, columns, row1_channel, row2_channel_name, std_lookup_channels, units = apply_derived_metrics(
+        df, columns, row1_channel, row2_channel_name, std_lookup_channels, units, series=series
     )
 
     (
@@ -370,14 +365,21 @@ def _process_sheet(
         signal_units,
         timestamp_column,
         elapsed_column,
-    ) = _split_structural_channels(columns, row1_channel, row2_channel_name, raw_lookup_channels, units)
+    ) = _split_structural_channels(columns, row1_channel, row2_channel_name, std_lookup_channels, units)
 
     # n_channels and channel catalog include signal/derived channels only.
     # Structural timestamp/elapsed columns are repeated on timeseries rows.
     n_channels = len(signal_columns)
 
-    # file_path: full abfss:// URI if available, else relative_path
-    filemeta = build_filemeta(abfss_file_path or relative_path, file_uuid, file_size, last_modified, series)
+    # filemeta is per-sheet (group level) so downstream joins stay 1:1.
+    filemeta = build_filemeta(
+        abfss_file_path or relative_path,
+        file_uuid,
+        file_size,
+        last_modified,
+        series,
+        group=sheet_name,
+    )
     channel = build_channel(file_uuid, sheet_name, signal_row1, signal_row2, signal_units)
     statistics = build_statistics(file_uuid, sheet_name, n_channels, n_rows)
 

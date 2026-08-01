@@ -1,36 +1,7 @@
-"""Silver dimension: Signal identity + canonical channel mapping.
+"""Signal identity and canonical channel mapping dimension.
 
-Assigns a deterministic `signal_id` (BIGINT) and enriches each channel with
-the canonical `std_channel` name from the mapping JSON config.  This is the
-single source of truth for channel display metadata.
-
-Key design decisions:
-  - signal_id = xxhash64(uuid, group, channel_id) → deterministic, stable.
-  - experiment_id = xxhash64(uuid, group) → FK to silver_dim_experiment.
-  - std_channel = COALESCE(mapped_std_channel, raw_channel) — falls back to
-    the raw name when no mapping entry exists.
-  - Includes a DQ uniqueness check: if the same (experiment_id, std_channel)
-    maps to multiple channel_ids within an experiment, the pipeline fails with
-    a detailed diagnostic to fix the mapping config.
-  - Incremental append: only new signal_id values are written each run.
-  - Source: bronze_channel + silver_dim_experiment + mapping JSON.
-
-Output table: silver_dim_signal
-    signal_id       BIGINT   -- xxhash64(uuid, group, channel_id)
-    experiment_id   BIGINT   -- FK to dim_experiment
-    uuid            STRING   -- natural key (needed for bronze join at Gold)
-    group           STRING   -- natural key (needed for bronze join at Gold)
-    channel_id      STRING   -- original header identifier (lineage key)
-    raw_channel     STRING   -- source display name from xlsx
-    std_channel     STRING   -- canonical mapped name
-    unit            STRING   -- measurement unit
-    series          STRING   -- denormalized for convenience
-    column_index    INT      -- original Excel column position
-
-Usage (via Databricks job):
-    spark_python_task:
-        python_file: ../src/_2_b2s/silver_dim_signal.py
-        parameters: ["--env", "dev", "--is_integration_test", "false"]
+Creates deterministic signal identifiers and resolves the canonical
+`std_channel` used by downstream gold and serving layers.
 """
 
 import sys
@@ -94,10 +65,7 @@ def build_dim_signal(
         .join(exp_lookup, on=["uuid", "group"], how="inner")
     )
 
-    # Join mapping to get std_channel (left join — not all channels have mappings)
-    # mapping_df.raw_channel = file_column from JSON = display name (xlsx Row 2).
-    # Matches against bronze raw_channel (also the display name in normal files).
-    # Fallback uses channel_id (Row 1 identifier — guaranteed unique by converter).
+    # Resolve canonical channel names from the mapping data when available.
     enriched = (
         enriched
         .join(
@@ -220,7 +188,7 @@ def main():
     # Build full dimension
     all_signals = build_dim_signal(channel_df, experiment_df, mapping_df)
 
-    # DQ uniqueness check — fail early if mapping produces ambiguity
+    # Validate that each experiment/channel combination resolves uniquely.
     check_std_channel_uniqueness(all_signals)
 
     # Incremental: only append new signal_id values

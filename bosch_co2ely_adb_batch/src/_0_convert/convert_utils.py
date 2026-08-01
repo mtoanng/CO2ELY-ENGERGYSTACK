@@ -1,29 +1,13 @@
-"""ELY Data Converter - shared utilities.
+"""Shared utilities for the XLSX converter stage.
 
-Architecture: Distributed Polars on Spark Workers + Azure SDK.
-- Auth: SP secret via spark_env_vars ({{secrets/...}} resolved at cluster start).
-- I/O: Azure Storage SDK (parallel HTTP download/upload, zero JVM).
-- Distribution: Spark mapPartitions distributes blob paths to workers.
-- Parsing: Polars + calamine (Rust-native). Never touches JVM heap.
-- Environment: auto-detected from workspace URL (dev/qa/prod).
+The converter produces four parquet-ready table types:
+- `filemeta`
+- `channel`
+- `timeseries`
+- `statistics`
 
-4 output tables: filemeta, channel, timeseries, statistics.
-Join key: UUID (deterministic UUID5 from relative blob path).
-
-Schema naming:
-- channel.channel_id = original column identifier (row 1 header)
-- channel.raw_channel = display name (row 2 header)
-- channel.unit = measurement unit (row 3 if detected)
-- timeseries.channel_id = references channel.channel_id (the original identifier)
-- timeseries.timestamp / elapsed_time_s = preserved structural columns, not signal rows
-
-Header logic (scan first 3 rows):
-- Row 1: channel_id (original column identifier/description)
-- Row 2: raw_channel (display name)
-- Row 3: if cells contain special chars or are single-char -> unit
-         else -> first data row (timeseries starts here)
-
-Timeseries: signal-only wide->long melt with sample_offset plus structural time.
+The deterministic file UUID is the primary source-side identifier used across
+converter outputs.
 """
 import os
 import re
@@ -146,6 +130,7 @@ SCHEMAS = {
         ("last_modified", pa.timestamp("us")),
         ("ingested_timestamp", pa.timestamp("us")),
         ("series", pa.string()),
+        ("group", pa.string()),
     ]),
     "channel": pa.schema([
         ("uuid", pa.string()),
@@ -488,8 +473,9 @@ def build_filemeta(
     file_path: str, file_uuid: str, file_size: int,
     last_modified: Optional[datetime],
     series: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> pa.Table:
-    """Build filemeta PyArrow table (1 row per file).
+    """Build filemeta PyArrow table (1 row per file-group).
 
     Args:
         file_path: Full abfss:// URI or relative path for traceability.
@@ -499,10 +485,11 @@ def build_filemeta(
         series: Governed series name resolved from the ADLS source folder
             during channel-mapping lookup (e.g. "PoC Stack VI"). None if no
             configured series folder matched the file's relative path.
+        group: Group identifier for the sheet / logical subgroup.
 
     Returns:
         PyArrow Table with schema: uuid, file_path, raw_file_name, file_size,
-        last_modified, ingested_timestamp, series.
+        last_modified, ingested_timestamp, series, group.
     """
     now = datetime.now(tz=timezone.utc)
     return pa.table({
@@ -513,6 +500,7 @@ def build_filemeta(
         "last_modified": [last_modified],
         "ingested_timestamp": [now],
         "series": [series],
+        "group": [group],
     }, schema=SCHEMAS["filemeta"])
 
 

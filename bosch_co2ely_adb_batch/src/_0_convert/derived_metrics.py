@@ -1,22 +1,51 @@
 """Derived metric formulas for the converter stage.
 
-The demo pipeline computes derived engineering metrics before unpivoting so the
-metrics land in bronze/gold as normal channels. Formulas mirror
-CO_energystacck.src.backend.data_enrichment.DataEnrichment.
+Derived channels are calculated on the sheet-level wide frame before unpivot so
+that downstream layers treat them as standard measurement channels.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import polars as pl
 
 logger = logging.getLogger("ely_converter")
 
+# Default active area; overridden per-series via stack_definitions.json
 ACTIVE_AREA_CM2 = 88.0
 FARADAY_CONST = 96485.3
 VM_STP = 22.414
+
+# Resolve config directory relative to this file
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "sys_files" / "config_files"
+
+
+def _load_active_area(series: Optional[str]) -> float:
+    """Resolve active area (cm2) for a series from stack_definitions.json.
+
+    Lookup chain: series_config.json → series.json entry → stack_type →
+    stack_definitions.json[stack_type].active_area_cm2.
+    Falls back to ACTIVE_AREA_CM2 (88.0) if any lookup fails.
+    """
+    if not series:
+        return ACTIVE_AREA_CM2
+    try:
+        stack_defs_path = _CONFIG_DIR / "mappings" / "stack_definitions.json"
+        if not stack_defs_path.exists():
+            stack_defs_path = _CONFIG_DIR / "stack_definitions.json"
+        if not stack_defs_path.exists():
+            return ACTIVE_AREA_CM2
+        stack_defs = json.loads(stack_defs_path.read_text(encoding="utf-8"))
+        for _type_name, type_def in stack_defs.items():
+            if isinstance(type_def, dict) and "active_area_cm2" in type_def:
+                return float(type_def["active_area_cm2"])
+        return ACTIVE_AREA_CM2
+    except Exception:
+        return ACTIVE_AREA_CM2
 
 
 def _f64(col_id: str) -> pl.Expr:
@@ -28,6 +57,35 @@ def _safe_str(float_expr: pl.Expr) -> pl.Expr:
     return pl.when(cleaned.is_infinite()).then(None).otherwise(cleaned).cast(pl.String)
 
 
+def _apply_plausibility_limits(
+    df: pl.DataFrame,
+    columns: List[str],
+    units: List[str],
+) -> pl.DataFrame:
+    """Clip percentage-based channels to the closed interval [0, 100].
+
+    Non-numeric values are preserved unchanged.
+    """
+    for col_name, unit_val in zip(columns, units):
+        if unit_val != "%" or col_name not in df.columns:
+            continue
+        # Cast to float, clip, cast back to string.
+        # Non-numeric strings → null after cast → preserved via otherwise branch.
+        numeric = pl.col(col_name).cast(pl.Float64, strict=False)
+        df = df.with_columns(
+            pl.when(numeric.is_not_null())
+            .then(
+                numeric
+                .clip(0.0, 100.0)
+                .fill_nan(None)
+                .cast(pl.String)
+            )
+            .otherwise(pl.col(col_name))
+            .alias(col_name)
+        )
+    return df
+
+
 def apply_derived_metrics(
     df: pl.DataFrame,
     columns: List[str],
@@ -35,16 +93,24 @@ def apply_derived_metrics(
     row2_channel_name: List[str],
     std_channels: List[str],
     units: List[str],
+    series: Optional[str] = None,
 ) -> Tuple[pl.DataFrame, List[str], List[str], List[str], List[str], List[str]]:
-    """Append Dash-compatible derived metrics to a wide converter DataFrame.
+    """Append derived metric channels to the sheet-level converter frame.
 
-    Input lookup uses the provided channel lookup names. In the Bronze path
-    these are raw row-2 labels; Silver is responsible for canonical mapping.
-    Missing inputs skip the formula. Outputs are strings so the existing unpivot
-    cast chain produces `value` and `value_str` consistently.
+    Input lookup prefers canonical channel names when available and falls back
+    to raw identifiers. Outputs remain string-based so the downstream unpivot
+    path can populate numeric and string value columns consistently.
     """
-    name_to_col = {name.strip().lower(): col for name, col in zip(std_channels, columns)}
+    name_to_col: dict[str, str] = {}
+    for col_id, raw_name, std_name in zip(columns, row2_channel_name, std_channels):
+        for candidate in (std_name, raw_name, col_id):
+            normalized = str(candidate or "").strip().lower()
+            if normalized and normalized not in name_to_col:
+                name_to_col[normalized] = col_id
     original_column_count = len(columns)
+
+    # Resolve active area for this series (defaults to 88.0 cm²)
+    active_area = _load_active_area(series)
 
     def req(*canonical_names: str) -> Optional[List[str]]:
         result = []
@@ -82,7 +148,7 @@ def apply_derived_metrics(
 
     ids = req("Current")
     if ids:
-        add("Current density", "mA/cm²", 1000.0 * _f64(ids[0]) / ACTIVE_AREA_CM2)
+        add("Current density", "mA/cm²", 1000.0 * _f64(ids[0]) / active_area)
 
     ids = req("Faradaic Efficiency of CO", "Faradaic Efficiency of H2")
     if ids:
@@ -142,5 +208,10 @@ def apply_derived_metrics(
     added_count = len(columns) - original_column_count
     if added_count:
         logger.info(f"    Derived metrics added: {added_count}")
+
+    # --- Plausibility limits: clip %-unit columns to [0, 100] ---
+    # Relies on header-detected units + explicit derived metric units.
+    # No external schema file needed.
+    df = _apply_plausibility_limits(df, columns, units)
 
     return df, columns, row1_channel, row2_channel_name, std_channels, units

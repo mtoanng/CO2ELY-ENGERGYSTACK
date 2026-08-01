@@ -1,12 +1,7 @@
-"""System: List integration test tables for manual cleanup.
+"""List integration-test artifacts for manual cleanup.
 
-Lists all _int_test suffixed tables created during integration testing.
-Operator uses output to manually clean via SQL editor.
-
-Usage:
-    spark_python_task:
-        python_file: ../src/_4_sys/sys_cleanup_int_test.py
-        parameters: ["--env", "dev"]
+The script prints the currently detected integration-test tables in the target
+catalog so operators can remove them through approved administrative tooling.
 """
 import sys
 import argparse
@@ -57,9 +52,9 @@ def main():
     print(f"\n{'='*60}")
     print(f"Found {len(existing)} integration test table(s).")
     if existing:
-        print("To clean up, run in SQL editor:")
+        print("Detected integration-test tables:")
         for fqn in existing:
-            print(f"  -- {fqn}")
+            print(f"  {fqn}")
 
 
 if __name__ == "__main__":
