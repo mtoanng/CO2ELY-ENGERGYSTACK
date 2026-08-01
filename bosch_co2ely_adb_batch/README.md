@@ -1,21 +1,34 @@
 # CO2ELY Databricks Pipeline
 
-Databricks batch pipeline for CO₂ electrolysis analytics, packaged as a Databricks Asset Bundle.
+Production Databricks batch pipeline for CO₂ electrolysis analytics.  
 
 ## Overview
 
-The pipeline processes sheet-based XLSX measurements into curated analytical tables for downstream querying.
+## Architecture
 
-High-level flow:
+<img width="1085" height="616" alt="image" src="https://github.com/user-attachments/assets/97d7ee5c-0ab7-48cf-ab0b-32b959715e52" />
 
-```text
-Raw XLSX files
--> converter parquet outputs
--> bronze Delta tables
--> silver dimensions
--> gold timeseries and 1-minute aggregates
--> serving aggregates and experiment index
--> SQL Warehouse / application queries
+
+
+```
+UC Volume (.xlsx uploads)
+    │
+    ▼ _1_r2b (Polars calamine)
+┌─────────────────────┐
+│  Bronze Delta Table │  bronze_co2_timeseries
+└─────────────────────┘
+    │
+    ▼ _2_b2s (Polars)
+┌─────────────────────┐
+│  Silver Enriched    │  silver_co2_timeseries_enriched (12 metrics)
+│  Silver Aggregated  │  silver_co2_timeseries_aggregated (15-min bins)
+└─────────────────────┘
+    │
+    ▼ _3_s2g
+┌─────────────────────┐
+│  Gold Summary       │  gold_co2_summary_statistics (KPIs)
+│  Gold Dashboard     │  gold_co2_timeseries_dashboard (chart data)
+└─────────────────────┘
 ```
 
 ## Data Flow
